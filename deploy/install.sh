@@ -931,9 +931,15 @@ main() {
   # A packaged CLI carries checked source and pins, but pulls images normally.
   # An explicit offline bundle still takes precedence over the packaged source.
   if [[ "$ACTION" == install || "$ACTION" == update ]]; then
-    if [[ -z "$BUNDLE" && -n "${BAWTHUB_PACKAGED_RELEASE:-}" && ( "$ACTION" == update || ! -f "$DIR/$SOURCE_MARK" ) ]]; then
-      BUNDLE="$BAWTHUB_PACKAGED_RELEASE"
-      SOURCE_ONLY=1
+    if [[ -z "$BUNDLE" && -n "${BAWTHUB_PACKAGED_RELEASE:-}" ]]; then
+      if [[ "$ACTION" == update || ! -f "$DIR/$SOURCE_MARK" ]] ||
+         # Refresh only the known affected CLI snapshots on a plain retry;
+         # an install from a different release bundle keeps its own source.
+         grep -qxE 'SOURCE_COMMIT=(b76a6cbd6124ae510ead28f2bb2d30a45e64b63d|25e47c623348bb1df631ccfc62a33493fbf52dfa)' \
+           "$DIR/$SOURCE_RELEASE" 2>/dev/null; then
+        BUNDLE="$BAWTHUB_PACKAGED_RELEASE"
+        SOURCE_ONLY=1
+      fi
     fi
     if [[ -n "${BAWTHUB_PACKAGED_RELEASE:-}" && ( -e "$DIR/.git" || -L "$DIR/.git" ) ]]; then
       die 'The packaged CLI does not install over a Git checkout. Select a separate install directory.'

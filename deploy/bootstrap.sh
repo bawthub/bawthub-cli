@@ -1287,9 +1287,9 @@ compose() { docker compose --project-name "$TENANT_NAME" "${FILES[@]}" "$@"; }
 #   3. BAWTHUB_IMAGE_MIRROR=127.0.0.1:<port> is set: pull from it, then use it;
 #   4. otherwise leave the ghcr.io reference for the normal pull.
 # Only the exported variables for this process change; tenant.env does not.
-# IMAGES_LOCAL_ONLY=1 afterwards means every resolved image is local, so the
-# pull fetches only what is missing (third-party tags included).
-IMAGES_LOCAL_ONLY=0
+# If any image uses a bundle cache, pull only missing images. The registry
+# behind a cached copy can be gone even when other images still need GHCR.
+PULL_MISSING_ONLY=0
 MIRROR_RE='^(127\.0\.0\.1|localhost):[0-9]{1,5}$'
 loopback_copy() { # $1=name $2=digest → REPLY = a local loopback ref with that digest
   local repo digest
@@ -1303,7 +1303,7 @@ loopback_copy() { # $1=name $2=digest → REPLY = a local loopback ref with that
   return 1
 }
 resolve_published_images() {
-  local images ref name digest key i resolved=0 missing_any=0
+  local images ref name digest key i resolved=0
   local from=() to=()   # parallel arrays: Bash 3.2 (macOS) has no associative arrays
   [[ -z "$IMAGE_MIRROR" || "$IMAGE_MIRROR" =~ $MIRROR_RE ]] || \
     die "BAWTHUB_IMAGE_MIRROR must be 127.0.0.1:<port> or localhost:<port> (got: $IMAGE_MIRROR)"
@@ -1322,7 +1322,7 @@ resolve_published_images() {
         die "the release bundle does not provide $ref (nothing started from it)"
       loopback_copy "$name" "$digest" || REPLY="$IMAGE_MIRROR/bawthub/$name@$digest"
     fi
-    if [[ -z "$REPLY" ]]; then missing_any=1; REPLY="$ref"; fi
+    [[ -n "$REPLY" ]] || REPLY="$ref"
     [[ "$REPLY" == "$ref" ]] || resolved=1
     from+=("$ref"); to+=("$REPLY")
   done <<< "$images"
@@ -1337,7 +1337,7 @@ resolve_published_images() {
       log "image: $key uses ${to[$i]} (pin unchanged: $ref)"
     done
   done
-  (( missing_any )) || IMAGES_LOCAL_ONLY=1
+  PULL_MISSING_ONLY=1
 }
 
 # Warn about secret values written into the manifest (provider keys belong in
@@ -1477,7 +1477,7 @@ case "$ACTION" in
       step "Downloading BawtHub (a few GB the first time; this can take a while)"
       resolve_published_images
       log "pulling images…"
-      if (( IMAGES_LOCAL_ONLY )); then compose pull --policy missing; else compose pull; fi
+      if (( PULL_MISSING_ONLY )); then compose pull --policy missing; else compose pull; fi
     fi
     if [[ "$TENANT_OPS" == "1" && "$OPS_WORKER_IMAGE_REF" == ghcr.io/* ]]; then
       docker image inspect "$OPS_WORKER_IMAGE_REF" >/dev/null 2>&1 || docker pull -q "$OPS_WORKER_IMAGE_REF" >/dev/null || \
