@@ -544,9 +544,18 @@ class Host:
         self.save()
 
     def verify(self, house):
-        deadline = time.monotonic() + self.verify_timeout()
+        progress = os.environ.get("BAWTHUB_HOUSE_INSTALL_PROGRESS") == "1"
+        next_report = time.monotonic()
+        deadline = next_report + self.verify_timeout()
         harness = next(row["harness"] for row in self.houses if row["id"] == house)
         while True:
+            now = time.monotonic()
+            if progress and now >= next_report:
+                print(
+                    f"bootstrap: @step Waiting for workspace {house} (health and agent connection)",
+                    flush=True,
+                )
+                next_report = now + 20
             current = next(
                 (row for row in inventory(self.project) if row.house == house), None
             )

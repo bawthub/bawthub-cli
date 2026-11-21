@@ -14,6 +14,7 @@ usage() {
     '  logs [-f] [--tail N] [SERVICE...]  Show logs (including stopped services)' \
     '  setup | install | configure | update | uninstall   Run the existing installer' \
     '  install --bundle DIR | update --bundle DIR      Use a local release bundle' \
+    '  install --verbose | update --verbose            Show Docker layer progress' \
     '' \
     'Use --dir or BAWTHUB_DIR for an existing install; the packaged CLI defaults' \
     'to the BawtHub user data folder. TENANT_ENV defaults to DIR/deploy/tenant.env.' \

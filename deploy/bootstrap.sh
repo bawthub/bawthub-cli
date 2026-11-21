@@ -1520,7 +1520,7 @@ case "$ACTION" in
       log "dev frontend: building from $DEV_FRONTEND_SOURCE_DIR and syncing its dependencies…"
       dev_frontend_sync true || die "dev frontend dependency sync failed (no app/frontend started)"
     fi
-    log "checking database isolation before app startup…"
+    step "Checking database connections and isolation"
     compose run --rm --no-deps --entrypoint node \
       -e DB_APP_HOST -e DB_APP_PORT -e DB_APP_USER -e DB_APP_PASSWORD \
       -e DB_APP_DATABASE -e DB_INIT_CREATE \
@@ -1546,12 +1546,15 @@ case "$ACTION" in
     step "Starting BawtHub (this can take a few minutes)"
     log "starting named core services and waiting for health…"
     compose up -d --wait "${core_services[@]}" || die "core services did not become healthy"
-    reconcile_houses --apply || die "house reconciliation failed; inspect its plan and journal"
+    step "Core services are healthy; preparing agent workspaces ($HOUSES configured)"
+    BAWTHUB_HOUSE_INSTALL_PROGRESS=1 reconcile_houses --apply || die "house reconciliation failed; inspect its plan and journal"
     if [[ "$VOICE" == "pocket" ]]; then
-      step "Setting up voices"
-      log "waiting for the published preset and seeding the tenant voice catalog…"
+      step "Setting up local voices and loading the speech preset"
       seeded=0
-      for _ in $(seq 1 120); do
+      for attempt in $(seq 1 120); do
+        if (( attempt > 1 && (attempt - 1) % 6 == 0 )); then
+          step "Still waiting for the local speech preset"
+        fi
         if compose exec -T voice-backend /app/.venv/bin/python -m bawthub.tts.seed_pocket_preset >/dev/null 2>&1; then
           seeded=1; break
         fi
@@ -1564,7 +1567,7 @@ case "$ACTION" in
       # containers and enable them behind approval cards. Idempotent: rows
       # already classified or edited by an operator are left alone. The app
       # seeds the catalog at startup, so retry until it is there.
-      log "classifying the ops catalog for this install…"
+      step "Configuring local service controls"
       svc_map="$(compose ps --format '{{.Service}} {{.Name}}' | \
         awk 'BEGIN{printf "{"} {printf "%s\"%s\":\"%s\"", (NR>1?",":""), $1, $2} END{print "}"}')"
       classified=0
@@ -1874,12 +1877,30 @@ print("LLM_BAWT_HOST_GUARD", GuardPolicy.from_env().mode)
         grep -qx "house-h$i healthy" <<<"$states" || return 1
       done
     }
+    next_report=$((SECONDS + 20))
+    voice_reported=0
     while (( SECONDS < deadline )); do
+      if (( SECONDS >= next_report )); then
+        pending=()
+        (( app_ok )) || pending+=(backend)
+        (( frontend_ok )) || pending+=(web)
+        (( voice_ok )) || pending+=(voice)
+        (( agent_ok )) || pending+=(agent-runtime)
+        (( houses_ok )) || pending+=(workspaces)
+        (( tools_ok )) || pending+=(agent-tools)
+        (( modes_ok )) || pending+=(sign-in)
+        step "Still checking: ${pending[*]}"
+        next_report=$((SECONDS + 20))
+      fi
       if (( ! app_ok )) && curl -fsS --max-time 5 "http://localhost:${app_port}/health" >/dev/null 2>&1; then
         app_ok=1; log "app /health : OK"
       fi
       if (( ! frontend_ok )) && curl -fsS --max-time 5 "http://localhost:${fe_port}/api/health" >/dev/null 2>&1; then
         frontend_ok=1; log "frontend /api/health : OK"
+      fi
+      if (( frontend_ok && ! voice_ok && ! voice_reported )) && [[ "$VOICE" != off ]]; then
+        step "Checking voice readiness ($VOICE)"
+        voice_reported=1
       fi
       if (( frontend_ok && ! voice_ok )) && voice_probe; then
         voice_ok=1; log "voice ($VOICE) : OK"

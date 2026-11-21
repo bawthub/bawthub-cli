@@ -43,6 +43,7 @@ CONFIRM=""
 SETTINGS=()
 PASSKEY_HOST_CHANGED=0
 CORE_ONLY=0
+VERBOSE=0
 BOT_PACK=""
 FIRST_INSTALL=0
 DOCKER_ROOT=""
@@ -107,6 +108,7 @@ usage() {
   printf '%s\n' '  install --core-only: first install with chat and bots only (no voice or agent tools)'
   printf '%s\n' '  install --bot-pack FILE: add the bots in a pack exported from another install'
   printf '%s\n' '  install or update --bundle DIR: use images from a local BawtHub release bundle'
+  printf '%s\n' '  install or update --verbose: also show Docker layer progress'
   printf '%s\n' '  update: install, applying newer published image pins without asking'
   printf '%s\n' '  configure: --voice pocket|off --microphone on|off --agent-tools on|off'
   printf '%s\n' '             --port NUMBER --lan-address HOST --access signin|trusted-lan'
@@ -712,9 +714,16 @@ run_bootstrap() {
 
 bootstrap_call() {
   rm -f "$TEMP_DIR/ready" "$TEMP_DIR/code-file" "$TEMP_DIR/access" "$TEMP_DIR/sessions"
-  if "$DIR/deploy/bootstrap.sh" "$@" </dev/null 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
+  local elapsed="$SECONDS" line
+  # Let Compose emit durable progress lines even though the installer captures
+  # its output. Only known progress formats, not arbitrary subprocess output,
+  # are echoed to the terminal; detailed diagnostics stay in the private log.
+  local resource='^[[:space:]]*(Image |Container |Network |Volume )?([a-zA-Z0-9][a-zA-Z0-9_./:@-]*)[[:space:]]+(Pulling|Pulled|Skipped|Creating|Created|Starting|Started|Running|Waiting|Healthy|Unhealthy|Recreating|Recreated|Downloading|Downloaded|Extracting|Interrupted|Error)([[:space:]]|$)'
+  local layer='^[[:space:]]*([0-9a-f]{8,64})[[:space:]]+(Pulling fs layer|Waiting|Downloading|Verifying Checksum|Download complete|Extracting|Pull complete)([[:space:]]|$)'
+  local bytes='([0-9.]+[kKMGT]?i?B[[:space:]]*/[[:space:]]*[0-9.]+[kKMGT]?i?B)'
+  if COMPOSE_ANSI=never COMPOSE_PROGRESS=plain "$DIR/deploy/bootstrap.sh" "$@" </dev/null 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
-      'bootstrap: @step '*) printf '  %s\n' "${line#bootstrap: @step }" >&2 ;;
+      'bootstrap: @step '*) printf '  [%ss] %s\n' "$((SECONDS - elapsed))" "${line#bootstrap: @step }" >&2; detail "$line" ;;
       'bootstrap: @access '*) printf '%s\n' "${line#bootstrap: @access }" > "$TEMP_DIR/access" ;;
       'bootstrap: @sessions '*) printf '%s\n' "${line#bootstrap: @sessions }" > "$TEMP_DIR/sessions" ;;
       'bootstrap: @ready '*) printf '%s\n' "${line#bootstrap: @ready }" > "$TEMP_DIR/ready" ;;
@@ -723,7 +732,19 @@ bootstrap_call() {
         # Legacy frontend fallback may contain a code. Terminal only, never log.
         if (( TTY_AVAILABLE )); then printf '%s\n' "$line" >&3
         else printf 'Owner setup uses an older frontend; run bootstrap up in a terminal to see its one-time code.\n' >&2; fi ;;
-      *) printf '%s\n' "$line" >> "$LOG_FILE" ;;
+      *)
+        detail "$line"
+        if (( VERBOSE )) && [[ "$line" =~ $layer ]]; then
+          local id="${BASH_REMATCH[1]}" state="${BASH_REMATCH[2]}" transfer=""
+          if [[ "$line" =~ $bytes ]]; then transfer=" ${BASH_REMATCH[1]}"; fi
+          printf '    %s: %s%s\n' "$id" "$state" "$transfer" >&2
+        elif [[ "$line" =~ $resource ]]; then
+          # Hex-only tokens are layer IDs, not resource updates.
+          local name="${BASH_REMATCH[2]}" state="${BASH_REMATCH[3]}"
+          if [[ ! "$name" =~ ^[0-9a-f]{8,64}$ ]]; then
+            printf '    %s: %s\n' "$name" "$state" >&2
+          fi
+        fi ;;
     esac
   done; then
     return 0
@@ -868,6 +889,7 @@ main() {
     case "$option" in
       --wipe) WIPE=1; continue ;;
       --core-only) CORE_ONLY=1; continue ;;
+      --verbose) VERBOSE=1; continue ;;
       --confirm|--voice|--microphone|--agent-tools|--port|--lan-address|--access|--bot-pack|--bundle)
         (( $# )) || die "$option needs a value."
         value="$1"; shift ;;
@@ -952,6 +974,7 @@ main() {
   mkdir -p "$HOME/.local/state/bawthub"
   LOG_FILE="$HOME/.local/state/bawthub/install-$(date +%Y%m%d-%H%M%S)-$$.log"
   (umask 077; : > "$LOG_FILE")
+  log "Live log: $LOG_FILE"
   TEMP_DIR="$(mktemp -d)"
   private_access
   env_file="${TENANT_ENV:-$DIR/deploy/tenant.env}"

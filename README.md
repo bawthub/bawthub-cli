@@ -3,7 +3,7 @@
 Install `bh` once on macOS or Linux with Node.js 20+ and npm:
 
 ```sh
-npm install -g https://github.com/bawthub/bawthub-cli/releases/download/v0.1.2/bawthub-cli-0.1.2.tgz
+npm install -g https://github.com/bawthub/bawthub-cli/releases/download/v0.1.3/bawthub-cli-0.1.3.tgz
 ```
 
 Then, with Docker Desktop (macOS) or Docker Engine and Compose v2 (Linux) running:
@@ -16,7 +16,7 @@ bh install
 
 Run `bh status`, `bh stop`, `bh start`, `bh restart` or `bh logs` from any directory. Stopping does not remove data. `bh setup` opens the installer menu; `bh --help` lists other commands. New installs default to `${XDG_DATA_HOME:-$HOME/.local/share}/bawthub/tenant` and get their own Docker project and volumes, leaving older installations alone. New installs use port 3000 when free, or the next available port through 3020. The installer prints the URL; existing CLI installs keep their saved port.
 
-Run `bh update` to download a newer CLI release, if one is available, and then update BawtHub with that release's installer. `bh update --bundle DIR` uses the local bundle without checking for a new CLI.
+Run `bh update` to download a newer CLI release, if one is available, and then update BawtHub with that release's installer. `bh update --bundle DIR` uses the local bundle without checking for a new CLI. Installs and updates show image and service progress by default; add `--verbose` for Docker layer details.
 
 To prepare a CLI release from a committed revision, run `bash deploy/pack-cli.sh FULL_COMMIT_SHA OUTPUT_DIRECTORY`. The npm archive contains the CLI and pinned installer inputs, not the runtime images.
 

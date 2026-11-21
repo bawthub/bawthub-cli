@@ -23,8 +23,10 @@ function isOnlineUpdate() {
     i += 2;
   }
   if (args[i] !== 'update') return false;
-  for (i++; i < args.length; i += 2) {
+  for (i++; i < args.length; i++) {
+    if (args[i] === '--verbose') continue;
     if (args[i] !== '--bot-pack' || !args[i + 1] || args[i + 1].startsWith('--')) return false;
+    i++;
     try {
       accessSync(args[i + 1], constants.R_OK);
       if (!statSync(args[i + 1]).isFile()) return false;
