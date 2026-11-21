@@ -1,0 +1,23 @@
+# Optional CPU microphone input, enabled by CPU_STT_IMAGE_REF in the manifest.
+# No host mounts, model downloads on startup, GPU, credentials or shared DB.
+services:
+  cpu-stt:
+    image: ${CPU_STT_IMAGE_REF:?set published ghcr.io/bawthub/cpu-stt@sha256 digest}
+    dns_search: ["."]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; h=json.load(urllib.request.urlopen('http://localhost:8080/health',timeout=3)); assert h['model_ready'] and h['device']=='cpu'"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+    cpus: 2
+    mem_limit: 768m
+
+  voice-backend:
+    environment:
+      - BAWTHUB_STT_URL=ws://cpu-stt:8080
+      - BAWTHUB_STT_PROVIDER=vosk
+    depends_on:
+      cpu-stt:
+        condition: service_healthy

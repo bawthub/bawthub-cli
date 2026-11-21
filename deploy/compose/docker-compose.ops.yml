@@ -1,0 +1,67 @@
+# Ops runner for a tenant (TASK-2128): approval-gated service actions with
+# receipts, the same runner echo uses (llm-bawt docker-compose.ops.yml).
+# On by default; TENANT_OPS=0 leaves this overlay out entirely.
+#
+# Privilege: only ops-reconciler mounts the Docker socket. It publishes no host
+# port and offers no generic Docker API; it runs only enabled catalog actions
+# that an approval card admitted. The app stays admission-only, with no socket.
+# The reconciler runs the tenant's digest-pinned app image; each approved job
+# runs in a short-lived worker from the digest-pinned ops-worker image.
+services:
+  app:
+    environment:
+      - LLM_BAWT_OPS_RECEIPT_ROOT=/var/lib/llm-bawt-ops
+      # TASK-2520: Settings > Host access runs against this tenant's bridge;
+      # the host-key actions are seeded (and adopted) enabled for it.
+      - LLM_BAWT_HOST_ACCESS_KEY_CONTAINER=${TENANT_NAME:-bawthub}-agent-bridge
+    volumes:
+      - ops-receipts:/var/lib/llm-bawt-ops
+
+  ops-reconciler:
+    image: ${APP_IMAGE_REF:?set published ghcr.io/bawthub/app@sha256 digest}
+    container_name: ${TENANT_NAME:-bawthub}-ops-reconciler
+    dns_search: ["."]
+    entrypoint: ["python", "-m", "llm_bawt.ops.reconciler"]
+    command: []
+    # Internal only: 8650 health (GET), 8651 the app's bearer-authenticated
+    # control channel. The bearer derives from the shared secret key.
+    expose: ["8650", "8651"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8650/health/ready', timeout=2).read()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 5s
+    # No env_file: the manifest holds provider keys the reconciler must not
+    # see. It gets only the database, Redis and the secret key it decrypts
+    # stored credentials and derives the control bearer with.
+    environment:
+      # The per-job worker: its own stdlib-only image (worker entrypoint and
+      # capability labels), published beside the app image.
+      - LLM_BAWT_OPS_WORKER_IMAGE=${OPS_WORKER_IMAGE_REF:?set OPS_WORKER_IMAGE_REF (ghcr.io/bawthub/ops-worker@sha256 digest) or TENANT_OPS=0}
+      - LLM_BAWT_OPS_RECONCILER_IMAGE=${APP_IMAGE_REF}
+      - LLM_BAWT_OPS_RECEIPT_VOLUME=${TENANT_NAME:-bawthub}-ops-receipts
+      - LLM_BAWT_OPS_RECEIPT_ROOT=/var/lib/llm-bawt-ops
+      - LLM_BAWT_SECRET_KEY=${LLM_BAWT_SECRET_KEY:-}
+      # Same database as the app: EXTERNAL_POSTGRES_* wins when set (the
+      # external-postgres overlay's values), else the local in-stack DB.
+      - LLM_BAWT_POSTGRES_HOST=${EXTERNAL_POSTGRES_HOST:-${LLM_BAWT_POSTGRES_HOST:-postgres}}
+      - LLM_BAWT_POSTGRES_PORT=${EXTERNAL_POSTGRES_PORT:-${LLM_BAWT_POSTGRES_PORT:-5432}}
+      - LLM_BAWT_POSTGRES_USER=${EXTERNAL_POSTGRES_USER:-${LLM_BAWT_POSTGRES_USER:-llm_bawt}}
+      - LLM_BAWT_POSTGRES_PASSWORD=${EXTERNAL_POSTGRES_PASSWORD:-${LLM_BAWT_POSTGRES_PASSWORD:-}}
+      - LLM_BAWT_POSTGRES_DATABASE=${EXTERNAL_POSTGRES_DATABASE:-${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}}
+      - LLM_BAWT_REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      # The app's config volume, read-only: the secret.key file fallback.
+      - app-config:/root/.config/llm-bawt:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ops-receipts:/var/lib/llm-bawt-ops
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ops-receipts:
+    name: ${TENANT_NAME:-bawthub}-ops-receipts

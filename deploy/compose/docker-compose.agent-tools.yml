@@ -1,0 +1,89 @@
+# docker-compose.agent-tools.yml — browser and crawl tools for agents (TASK-2130).
+#
+# On by default (AGENT_TOOLS=1); AGENT_TOOLS=0 leaves this overlay out and a
+# rerun removes the two containers. CPU only: no GPU device is requested.
+#
+# The agent bridge and houses already register both MCP servers by service
+# name (playwright-mcp:8931, crawl4ai:11235), so only the services and the
+# Crawl4AI bearer are added here. That bearer is derived from
+# LLM_BAWT_SECRET_KEY: the app writes it at startup, 0600, into two volumes,
+# one copy owned by Crawl4AI's user (uid 999, read at its boot) and one by the
+# agent-bridge image's user (uid 1000, read on every call). Nobody types it,
+# and it survives a repave because the root key does.
+#
+# Neither service publishes a port; agents reach them on the tenant network.
+
+services:
+  app:
+    environment:
+      - LLM_BAWT_CRAWL4AI_URL=http://crawl4ai:11235
+      - CRAWL4AI_API_TOKEN_EXPORT_FILE=/run/crawl4ai-token/api_token
+      - CRAWL4AI_API_TOKEN_EXPORT_UID=999
+      - CRAWL4AI_API_TOKEN_BRIDGE_EXPORT_FILE=/run/bridge-tokens/crawl4ai
+      # The app's own web_fetch reads the bridges' copy.
+      - CRAWL4AI_API_TOKEN_FILE=/run/bridge-tokens/crawl4ai
+    volumes:
+      - crawl4ai-token:/run/crawl4ai-token
+
+  agent-bridge:
+    environment:
+      - CRAWL4AI_API_TOKEN_FILE=/run/bridge-tokens/crawl4ai
+    # The bridge writes its MCP settings, Crawl4AI bearer included, once at
+    # boot. The app exports the token in its startup before /health answers,
+    # so waiting for a healthy app means the first boot already has it.
+    depends_on:
+      app:
+        condition: service_healthy
+
+  playwright-mcp:
+    image: ${PLAYWRIGHT_MCP_IMAGE_REF:?set a digest-pinned mcp/playwright image}
+    container_name: ${TENANT_NAME:-bawthub}-playwright-mcp
+    dns_search: ["."]
+    # Reaps orphaned Chrome children.
+    init: true
+    # --snapshot-mode none keeps the accessibility tree off every action
+    # result (agents call browser_snapshot when they want it); the viewport
+    # caps screenshot size. --allowed-hosts: callers use the service name.
+    command: ["--headless", "--no-sandbox", "--isolated", "--port", "8931", "--host", "0.0.0.0",
+              "--allowed-hosts", "*", "--snapshot-mode", "none", "--viewport-size", "1280x720"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(8931,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  crawl4ai:
+    image: ${CRAWL4AI_IMAGE_REF:?set a digest-pinned unclecode/crawl4ai image}
+    container_name: ${TENANT_NAME:-bawthub}-crawl4ai
+    dns_search: ["."]
+    # The image's entrypoint reads its bearer from /run/secrets/api_token.
+    volumes:
+      - crawl4ai-token:/run/secrets:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    # The embedded Redis runs as appuser while /app is root-owned, so its
+    # snapshots need a writable /data and a patched copy of the configs.
+    # Without the exported token the wrapper exits and the container restarts
+    # until the app has written it.
+    tmpfs:
+      - /data:uid=999,gid=999
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        if [ ! -s /run/secrets/api_token ]; then
+          echo "crawl4ai: no exported API token at /run/secrets/api_token; refusing to start" >&2
+          exit 1
+        fi
+        cp /app/supervisord.conf /tmp/supervisord.conf
+        sed -i 's|command=/usr/bin/redis-server|command=/usr/bin/redis-server --dir /data|' /tmp/supervisord.conf
+        cp /app/entrypoint.sh /tmp/entrypoint.sh
+        sed -i 's|supervisord -c supervisord.conf|supervisord -c /tmp/supervisord.conf|' /tmp/entrypoint.sh
+        chmod +x /tmp/entrypoint.sh
+        exec /tmp/entrypoint.sh
+    restart: unless-stopped
+
+volumes:
+  crawl4ai-token:

@@ -1,0 +1,290 @@
+# docker-compose.base.yml — CANONICAL tenant core (app + frontend + redis).
+#
+# This file has NO postgres service and NO `depends_on: postgres`. The local DB
+# and that dependency edge live only in docker-compose.localdb.yml, so external
+# mode omits localdb.yml and gets neither an orphan container nor a dangling
+# dependency. See deploy/README.md (composition matrix).
+#
+# DB host is a variable defaulting to `postgres` (satisfied by localdb.yml).
+# external-postgres.yml overrides it to a real host. NOTE: DB values are set in
+# inline `environment:` here because inline env BEATS env_file — the whole point
+# of the overlay is to override these, which env_file could not do.
+#
+# Every tenant service sets `dns_search: ["."]` (TASK-1561). Otherwise a
+# container inherits the Docker host's search domain. When an in-stack peer is
+# stopped, a bare name like `postgres` then expands to `postgres.<host
+# domain>` and can reach a foreign LAN server, which gets this tenant's DB
+# login. With no search domain a missing peer fails to resolve instead.
+# In-stack service names still resolve through Docker's embedded DNS. External
+# hosts (EXTERNAL_POSTGRES_HOST, EXTERNAL_VOICE_URL) must be an IP or a fully
+# qualified name. Overlays that add a service set it too, and
+# tests/test_tenant_dns_isolation.py checks every service in every mode.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ${TENANT_NAME:-bawthub}-redis
+    dns_search: ["."]
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  app:
+    image: ${APP_IMAGE_REF:?set published ghcr.io/bawthub/app@sha256 digest}
+    container_name: ${TENANT_NAME:-bawthub}-app
+    dns_search: ["."]
+    env_file:
+      - ${TENANT_ENV:-../tenant.env}
+    labels:
+      io.bawthub.tenant-manifest: "${TENANT_ENV:-}"
+    environment:
+      - LLM_BAWT_SERVICE_HOST=0.0.0.0
+      # Shared media links point at this install's own frontend (TASK-2140),
+      # unless the manifest sets LLM_BAWT_PUBLIC_ORIGIN (e.g. a TLS proxy).
+      - LLM_BAWT_PUBLIC_ORIGIN=${LLM_BAWT_PUBLIC_ORIGIN:-${AGENT_ORIGIN}}
+      # App transport fallback; workspace.bridge_url may override it at runtime.
+      - LLM_BAWT_WORKSPACE_BRIDGE_URL=http://agent-bridge:8681
+      # Task tools and the assigned-cards notice call this install's frontend;
+      # the app's built-in default names another deployment's service.
+      - LLM_BAWT_TASK_API_URL=http://frontend:3000
+      # Same for task association, the notification bell, commit evidence and
+      # chat upload reads: their built-in defaults also name another
+      # deployment's frontend.
+      - BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL=http://frontend:3002
+      - BAWTHUB_COMMIT_EVIDENCE_URL=http://frontend:3002
+      - BAWTHUB_UPLOADS_INTERNAL_URL=http://frontend:3000
+      # MCP OAuth token checks (TASK-2426) go to the frontend's internal port.
+      # Only used when the manifest turns on LLM_BAWT_MCP_OAUTH_*.
+      - LLM_BAWT_MCP_OAUTH_INTROSPECT_URL=http://frontend:3002
+      # The retired vault's master key (TASK-1477). A legacy manifest may still
+      # hold it, and env_file would hand it to the app, which no longer reads it.
+      # Inline env beats env_file, so this empties it. Only bootstrap's
+      # `import-vault` uses the key, as a read-only file mount on a one-shot.
+      - BAWTHUB_MASTER_KEY=
+      # Provider-credential encryption key (Fernet) for the encrypted
+      # CredentialStore that holds OAuth bundles and API keys. bootstrap's
+      # provision_app_secret_key resolves the ACTIVE key (adopting an existing
+      # app-config secret.key) so it survives a repave. Empty = the app's own
+      # file fallback, which only an unprovisioned tenant ever sees.
+      - LLM_BAWT_SECRET_KEY=${LLM_BAWT_SECRET_KEY:-}
+      # Shared secret gating the /v1/providers/*/token brokers. The app port
+      # is published, so without it any LAN client could read provider tokens.
+      - BRIDGE_CLAUDE_TOKEN_SECRET=${BRIDGE_CLAUDE_TOKEN_SECRET:-}
+      # Soft `:-` defaults only. bootstrap.sh is the single validation authority
+      # (it fails fast with clear messages); a hard `:?` here would fire during
+      # base-file interpolation even in external mode, where the overlay wins.
+      - LLM_BAWT_POSTGRES_HOST=${LLM_BAWT_POSTGRES_HOST:-postgres}
+      - LLM_BAWT_POSTGRES_PORT=${LLM_BAWT_POSTGRES_PORT:-5432}
+      - LLM_BAWT_POSTGRES_USER=${LLM_BAWT_POSTGRES_USER:-llm_bawt}
+      - LLM_BAWT_POSTGRES_PASSWORD=${LLM_BAWT_POSTGRES_PASSWORD:-}
+      - LLM_BAWT_POSTGRES_DATABASE=${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}
+      # The app's Config only reads LLM_BAWT_-prefixed env. Without this the
+      # shared agent Redis transport never starts: /v1/ws (the unified event
+      # stream) answers 503 and agent bots have no bridge transport. Bare
+      # REDIS_URL is what agent bridges read; keep both.
+      - LLM_BAWT_REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      # The MCP server refuses unlisted Host headers (DNS-rebinding guard).
+      # Agent bridges and houses reach it as app:8001, so without `app:*` every
+      # agent turn loses the bawthub tools with a 421.
+      - LLM_BAWT_MCP_ALLOWED_HOSTS=127.0.0.1:*,localhost:*,app:*
+      # BawtHub service bearer (TASK-1472): derived from LLM_BAWT_SECRET_KEY, so
+      # bootstrap provisions nothing. The app writes it at startup, 0600, owned
+      # by the frontend image's user (uid 1001), for the frontend to read.
+      # Rotating it means rotating LLM_BAWT_SECRET_KEY.
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_FILE=/run/bawthub-service-token/token
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_UID=${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
+      # The Git credential helper must authenticate before it can request a
+      # connected GitHub credential. Export only its derived gate, not a PAT.
+      - BRIDGE_GIT_CREDENTIAL_TOKEN_EXPORT_FILE=/run/bridge-tokens/git-credential
+      - BRIDGE_TOKEN_EXPORT_UID=1000
+      # Per-caller llm-bawt API keys (TASK-2380): the app generates one key per
+      # caller at startup and writes each to its own volume, owned by that
+      # caller's uid (gid 1000 adds group read, 0640). Each caller mounts only
+      # its own volume. Houses share the bridge's key; voice is exported even
+      # with VOICE=off so the overlay need not rewrite this list.
+      - LLM_BAWT_API_KEY_EXPORTS=llm-bawt-app=/run/llm-bawt-api-keys/app,bridge-claude-code=/run/llm-bawt-api-keys/bridge-claude-code:1000,bawthub-web=/run/llm-bawt-api-keys/bawthub-web:${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001},bawthub-voice=/run/llm-bawt-api-keys/bawthub-voice:${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}:1000
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-keys/app/api-key
+      # Enforcement defaults (bootstrap sets enforce for ACCESS=signin; empty
+      # keeps the app's own default). The auth modes yield to a settings row.
+      - LLM_BAWT_API_AUTH_MODE=${LLM_BAWT_API_AUTH_MODE:-}
+      - LLM_BAWT_MCP_AUTH_MODE=${LLM_BAWT_MCP_AUTH_MODE:-}
+      - LLM_BAWT_HOST_GUARD=${LLM_BAWT_HOST_GUARD:-}
+      - LLM_BAWT_ALLOWED_HOSTS=${LLM_BAWT_ALLOWED_HOSTS:-}
+      # Skills (TASK-2534): Bots > Skills > Sources installs and updates them
+      # on the skill-sources volume, independent of image releases. The app
+      # builds <store>/current from the configured sources plus the image's
+      # bundled skills (TASK-2130) as fallback; the bridge and houses read the
+      # same tree. The second path keeps an older image serving the bundle.
+      - SKILL_SOURCES_ROOT=/var/lib/bawthub/skill-sources
+      - SKILL_SOURCES_FALLBACK=/opt/bawthub/skills
+      # Built-in source: a public manifest of reviewed BawtHub skill releases,
+      # signed with a key the app image ships. Empty = bundle only.
+      - SKILL_SOURCES_DEFAULT_URL=${SKILL_SOURCES_DEFAULT_URL:-}
+      - CLAUDE_CODE_SKILLS_PATH=/opt/bawthub/skills
+      - SKILL_SOURCES_CURRENT=/var/lib/bawthub/skill-sources/current
+    # Loopback only unless bootstrap opts out (ACCESS=trusted-lan or
+    # PUBLISH_APP_PORTS=1); the frontend, houses and voice use the network.
+    ports:
+      - "${APP_PUBLISH_PREFIX-127.0.0.1:}${MCP_PORT:-8001}:8001"
+      - "${APP_PUBLISH_PREFIX-127.0.0.1:}${SERVICE_PORT:-8642}:8642"
+    volumes:
+      - app-config:/root/.config/llm-bawt
+      - app-storage:/app/storage
+      # Installed skill sources and the effective skill tree (TASK-2534).
+      - skill-sources:/var/lib/bawthub/skill-sources
+      # MediaStore blobs (uploads, generated media); without a volume they
+      # live in the container layer and vanish when up recreates the app.
+      - app-media:/var/lib/llm-bawt/media
+      - app-logs:/app/.logs
+      - service-token:/run/bawthub-service-token
+      - bridge-tokens:/run/bridge-tokens
+      - api-key-app:/run/llm-bawt-api-keys/app
+      - api-key-bridge:/run/llm-bawt-api-keys/bridge-claude-code
+      - api-key-web:/run/llm-bawt-api-keys/bawthub-web
+      - api-key-voice:/run/llm-bawt-api-keys/bawthub-voice
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: ${TENANT_FRONTEND_IMAGE_REF:?set published ghcr.io/bawthub/frontend@sha256 digest (legacy tenant-frontend pins also work)}
+    container_name: ${TENANT_NAME:-bawthub}-frontend
+    dns_search: ["."]
+    environment:
+      - BAWTHUB_LLM_URL=http://app:8642
+      # The Compose project is the tenant's first-party service identity.
+      - TENANT_NAME=${TENANT_NAME:-bawthub}
+      # A separate database in the same PostgreSQL container. External mode
+      # overrides this URL in docker-compose.external-postgres.yml.
+      # bootstrap resolves and URL-encodes local DB credentials; external
+      # postgres overlay supplies its own dedicated frontend URL.
+      - DATABASE_URL=${FRONTEND_DATABASE_URL:?use deploy/bootstrap.sh to provide the frontend DB URL}
+      - AGENT_ORIGIN=${AGENT_ORIGIN:?use deploy/bootstrap.sh to provide the frontend origin}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-fs}
+      # Access posture (TASK-2390): bootstrap sets these from ACCESS. signin
+      # turns sessions on, distrusts identity headers and gives visitors
+      # without a session no user. The fallbacks below are the trusted-lan
+      # (sessionless, trusted network only) behavior.
+      - BAWTHUB_AUTH_SESSIONS=${BAWTHUB_AUTH_SESSIONS:-off}
+      - BAWTHUB_AUTH_URL=${BAWTHUB_AUTH_URL:-}
+      - BAWTHUB_IDENTITY_HEADERS=${BAWTHUB_IDENTITY_HEADERS:-}
+      # One passkey across this install's sibling sites (TASK-2544): a shared
+      # parent domain as the relying party id. Empty = the sign-in host only.
+      - BAWTHUB_AUTH_PASSKEY_DOMAIN=${BAWTHUB_AUTH_PASSKEY_DOMAIN:-}
+      - BAWTHUB_UNAUTHENTICATED_SUBJECT_POLICY=${BAWTHUB_UNAUTHENTICATED_SUBJECT_POLICY:-selected-subject}
+      # MCP OAuth (TASK-2426): public MCP resource URLs this install signs
+      # clients in for. Empty = no OAuth server. The app's matching
+      # LLM_BAWT_MCP_OAUTH_* settings come from tenant.env via env_file.
+      - BAWTHUB_MCP_RESOURCES=${BAWTHUB_MCP_RESOURCES:-}
+      # Optional: first-run setup binds the owner account to this existing
+      # profile (e.g. when turning sign-in on for an install already in use)
+      # instead of creating a new one. Empty = a fresh owner profile.
+      - BAWTHUB_OWNER_ENTITY_ID=${BAWTHUB_OWNER_ENTITY_ID:-}
+      # Installer-held owner setup code (bootstrap.sh, 0600 file in the tenant
+      # secrets dir). Set = the pending setup uses it and never logs it.
+      - BAWTHUB_OWNER_SETUP_CODE=${BAWTHUB_OWNER_SETUP_CODE:-}
+      # The token the app exported (read on every call). Only the token is
+      # shared, never the master key.
+      - BAWTHUB_SERVICE_TOKEN_FILE=/run/bawthub-service-token/token
+      # This caller's llm-bawt API key (TASK-2380), read on every call.
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-key/api-key
+    volumes:
+      - service-token:/run/bawthub-service-token:ro
+      - api-key-web:/run/llm-bawt-api-key:ro
+      # Shared workspace: bridge writes; frontend only reads and tracks repos.
+      - bridge-dev:/repos:ro
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    # Healthy, not just started: the app exports the service token during
+    # startup, and a sign-in frontend refuses to boot without it. From a
+    # local bundle the frontend otherwise wins that race and restarts.
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The agent runtime (TASK-1293): the wizard's first bot is a claude-code
+  # agent, so every tenant runs one bridge. Native Claude and proxied
+  # (OpenAI/xAI/OpenRouter) routes both run here. It holds NO provider
+  # credentials: tokens and keys come from the app's brokers per request, and
+  # the app stays the only OAuth refresher. Skills come read-only from the
+  # app's skill-sources volume (image bundle as fallback); no host paths.
+  agent-bridge:
+    image: ${AGENT_BRIDGE_IMAGE_REF:?set published ghcr.io/bawthub/agent-bridge@sha256 digest}
+    container_name: ${TENANT_NAME:-bawthub}-agent-bridge
+    dns_search: ["."]
+    command: ["python", "-m", "claude_code_bridge"]
+    environment:
+      - LLM_BAWT_API_URL=http://app:8642
+      - CLAUDE_CODE_SKILLS_PATH=/opt/bawthub/skills
+      - SKILL_SOURCES_CURRENT=/var/lib/bawthub/skill-sources/current
+      # The app binds 0.0.0.0; from the bridge it is the compose service name.
+      - LLM_BAWT_SERVICE_HOST=app
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CLAUDE_CODE_BAWTHUB_MCP_URL=http://app:8001/mcp
+      - BRIDGE_CLAUDE_TOKEN_SECRET=${BRIDGE_CLAUDE_TOKEN_SECRET:-}
+      - ENABLE_TOOL_SEARCH=true
+      # This caller's llm-bawt API key (TASK-2380).
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-key/api-key
+      - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/bridge-tokens/git-credential
+      # Image-baked helper, GitHub only. Credentials remain app-side; these
+      # settings contain no PAT or App key and survive repaves automatically.
+      - GIT_CONFIG_COUNT=3
+      - GIT_CONFIG_KEY_0=credential.https://github.com.helper
+      - GIT_CONFIG_VALUE_0=bawthub
+      - GIT_CONFIG_KEY_1=credential.https://github.com.useHttpPath
+      - GIT_CONFIG_VALUE_1=true
+      - GIT_CONFIG_KEY_2=url.https://github.com/.insteadOf
+      - "GIT_CONFIG_VALUE_2=git@github.com:"
+    volumes:
+      # Harness/session state only (sessions, settings.json); never credentials.
+      - bridge-claude:/home/bridge/.claude
+      # Agent workspace (empty until repo cloning lands, TASK-837).
+      - bridge-dev:/home/bridge/dev
+      # This installation's host-access SSH identity and pinned host trust
+      # (TASK-2520): the bridge generates the key on first start; Settings >
+      # Host access authorizes it and writes trust here. Never a host path.
+      - bridge-ssh:/home/bridge/.ssh
+      - api-key-bridge:/run/llm-bawt-api-key:ro
+      - bridge-tokens:/run/bridge-tokens:ro
+      - skill-sources:/var/lib/bawthub/skill-sources:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8681/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  # TASK-2534: installed skill sources; the app writes, bridges and houses read.
+  skill-sources:
+  app-config:
+  app-storage:
+  app-media:
+  app-logs:
+  # TASK-1472: the exported BawtHub service token (app writes, frontend reads).
+  service-token:
+  # Derived internal gates; app writes, agent bridge and houses only read.
+  bridge-tokens:
+  # TASK-2380: one llm-bawt API key per caller (app writes, that caller reads).
+  api-key-app:
+  api-key-bridge:
+  api-key-web:
+  api-key-voice:
+  bridge-claude:
+  bridge-dev:
+  bridge-ssh:

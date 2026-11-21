@@ -1,0 +1,72 @@
+# TASK-2523: explicit opt-in; do not add to the default installer stack.
+# This overlay is for the single app + single frontend tenant topology.
+x-renderer-image: &renderer-image mcp/playwright@sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52d7d995f8d1492
+
+services:
+  app:
+    environment:
+      BAWTHUB_INSPECTION_ORIGIN: ${BAWTHUB_AUTH_URL:?set the canonical sign-in origin for inspection}
+      BAWTHUB_INSPECTION_KEY_EXPORT_FILE: /run/bawthub-inspection-key/key
+      BAWTHUB_INSPECTION_KEY_EXPORT_UID: ${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
+      BAWTHUB_INSPECTION_INTERNAL_URL: http://frontend:3002
+    volumes:
+      - inspection-key:/run/bawthub-inspection-key
+
+  frontend:
+    environment:
+      BAWTHUB_INSPECTION_KEY_FILE: /run/bawthub-inspection-key/key
+    volumes:
+      - inspection-key:/run/bawthub-inspection-key:ro
+      - inspection-socket:/run/bawthub-inspection:ro
+
+  # The frontend runtime and the renderer share only this socket, under UID 1001.
+  inspection-socket-init:
+    image: *renderer-image
+    network_mode: none
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      disable: true
+    entrypoint: [/bin/sh, -ec]
+    command: ['chmod 0700 /run/bawthub-inspection && chown 1001:1001 /run/bawthub-inspection']
+    volumes:
+      - inspection-socket:/run/bawthub-inspection
+
+  inspection-renderer:
+    image: *renderer-image
+    network_mode: none
+    user: '1001:1001'
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      HOME: /tmp
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    shm_size: 256m
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 256
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    depends_on:
+      inspection-socket-init:
+        condition: service_completed_successfully
+    entrypoint: [node, /opt/inspection-renderer.cjs]
+    volumes:
+      - inspection-socket:/run/bawthub-inspection
+      - type: bind
+        source: ./inspection-renderer.cjs
+        target: /opt/inspection-renderer.cjs
+        read_only: true
+        bind:
+          create_host_path: false
+
+volumes:
+  inspection-key:
+  inspection-socket:

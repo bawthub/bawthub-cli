@@ -1,0 +1,83 @@
+# Traefik dynamic routing for the echo BawtHub stack (TASK-1172).
+#
+# This file is the single source of BawtHub's HTTP routes. Traefik loads it with
+# the file provider, so it does not need the Docker socket: upstreams are the
+# Compose service names on bawthub_default (Docker's embedded DNS). Traefik is
+# attached only to bawthub_default, so a multi-homed service (frontend,
+# frontend-prod) always resolves to its bawthub_default address; no network pin
+# is needed.
+#
+# Traefik watches this directory: a saved edit applies without a restart, and an
+# edit that fails to parse is logged while the last good routes keep serving.
+# Container health does not affect routing; a stopped upstream answers 502.
+#
+# ROUTING GUIDANCE (READ BEFORE ADDING NEW /api/* ENDPOINTS)
+# - The backend owns a host-agnostic PathPrefix(`/api`) catch-all at priority 100.
+# - A frontend-owned /api/* prefix must be added to BOTH frontend-api (dev) and
+#   frontprod-api (prod) at priority 200, or the backend swallows it.
+# - Page routers sit at priority 10, below the backend catch-all.
+# - Hosts: dev.bawthub.com -> live HMR `frontend`; app.bawthub.com -> baked
+#   `frontend-prod`. Do not re-add retired aliases (TASK-1180).
+# Verify a change against a real Traefik: deploy/traefik/check_routes.py.
+http:
+  routers:
+    # Dev preview: live Vite/HMR frontend.
+    frontend:
+      rule: "Host(`dev.bawthub.com`)"
+      entryPoints: [web]
+      priority: 10
+      service: frontend
+    frontend-api:
+      rule: "(Host(`dev.bawthub.com`)) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/llm`) || PathPrefix(`/api/unraid`) || PathPrefix(`/api/preferences`) || PathPrefix(`/api/bot-colors`) || PathPrefix(`/api/camera-presets`) || PathPrefix(`/api/avatar`) || PathPrefix(`/api/docker`) || PathPrefix(`/api/notifications`) || PathPrefix(`/api/agents`) || PathPrefix(`/api/tasks`) || PathPrefix(`/api/uploads`) || PathPrefix(`/api/media`) || PathPrefix(`/api/repos`) || PathPrefix(`/api/clog`) || PathPrefix(`/api/system`) || PathPrefix(`/api/auth`) || PathPrefix(`/api/setup`) || PathPrefix(`/api/hooks`) || PathPrefix(`/api/playground`) || PathPrefix(`/api/v1`))"
+      entryPoints: [web]
+      priority: 200
+      service: frontend
+    # TASK-1783: exact dev liveness exception, not a shared /api/health prefix.
+    # Leave prod and every neighboring health path on their existing routes.
+    frontend-health-live:
+      rule: "Host(`dev.bawthub.com`) && Path(`/api/health/live`)"
+      entryPoints: [web]
+      priority: 200
+      service: frontend
+    # Prod: baked frontend.
+    frontprod:
+      rule: "Host(`app.bawthub.com`)"
+      entryPoints: [web]
+      priority: 10
+      service: frontend-prod
+    frontprod-api:
+      rule: "(Host(`app.bawthub.com`)) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/llm`) || PathPrefix(`/api/unraid`) || PathPrefix(`/api/preferences`) || PathPrefix(`/api/bot-colors`) || PathPrefix(`/api/camera-presets`) || PathPrefix(`/api/avatar`) || PathPrefix(`/api/docker`) || PathPrefix(`/api/notifications`) || PathPrefix(`/api/agents`) || PathPrefix(`/api/tasks`) || PathPrefix(`/api/uploads`) || PathPrefix(`/api/media`) || PathPrefix(`/api/repos`) || PathPrefix(`/api/clog`) || PathPrefix(`/api/system`) || PathPrefix(`/api/auth`) || PathPrefix(`/api/setup`) || PathPrefix(`/api/hooks`) || PathPrefix(`/api/playground`) || PathPrefix(`/api/v1`))"
+      entryPoints: [web]
+      priority: 200
+      service: frontend-prod
+    # Python voice/agent backend: every /api/* not claimed above, on any host.
+    backend:
+      rule: "PathPrefix(`/api`)"
+      entryPoints: [web]
+      priority: 100
+      middlewares: [strip-api]
+      service: backend
+
+  middlewares:
+    strip-api:
+      replacePathRegex:
+        regex: "^/api/(.*)"
+        replacement: "/$1"
+
+  # One server per service: each is a single-replica Compose service. Docker DNS
+  # follows recreation (new container, same name), but Traefik does not spread
+  # load across several A records; scaling a service needs its replicas listed
+  # here, or an orchestrator's Service/Ingress.
+  services:
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend:5173"
+    frontend-prod:
+      loadBalancer:
+        servers:
+          - url: "http://frontend-prod:3000"
+    backend:
+      loadBalancer:
+        servers:
+          - url: "http://backend:80"

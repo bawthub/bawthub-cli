@@ -1,0 +1,38 @@
+# docker-compose.localdb.yml — LOCAL postgres overlay (the default).
+#
+# Included ONLY when EXTERNAL_POSTGRES_* is unset. Adds the pgvector container,
+# its volume, and the app/frontend -> postgres `depends_on` edges. Because this
+# edge lives here (not in base.yml), external mode drops the local DB with no
+# dangling dependency. depends_on maps MERGE across files, so app keeps its
+# base redis dependency and gains postgres here.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ${TENANT_NAME:-bawthub}-postgres
+    dns_search: ["."]  # TASK-1561, see docker-compose.base.yml
+    environment:
+      - POSTGRES_USER=${LLM_BAWT_POSTGRES_USER:-llm_bawt}
+      - POSTGRES_PASSWORD=${LLM_BAWT_POSTGRES_PASSWORD:?set LLM_BAWT_POSTGRES_PASSWORD in tenant.env}
+      - POSTGRES_DB=${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LLM_BAWT_POSTGRES_USER:-llm_bawt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pg-data:

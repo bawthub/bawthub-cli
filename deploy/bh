@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# User-local control for installed BawtHub tenants. Compatible with macOS Bash 3.2.
+set -euo pipefail
+export LC_ALL=C
+unset CDPATH
+
+die() { printf 'bh: %s\n' "$*" >&2; exit 1; }
+usage() {
+  printf '%s\n' \
+    'Usage: bh [--dir DIR] [--manifest FILE] [--context NAME] COMMAND' \
+    '       bh [--dir DIR] [--manifest FILE] [--context NAME] [--installer FILE] ACTION [OPTIONS]' \
+    '' \
+    '  start | stop | restart | status   Use existing containers; keep all data' \
+    '  logs [-f] [--tail N] [SERVICE...]  Show logs (including stopped services)' \
+    '  setup | install | configure | update | uninstall   Run the existing installer' \
+    '  install --bundle DIR | update --bundle DIR      Use a local release bundle' \
+    '' \
+    'Use --dir or BAWTHUB_DIR for an existing install; the packaged CLI defaults' \
+    'to the BawtHub user data folder. TENANT_ENV defaults to DIR/deploy/tenant.env.' \
+    'Uses the current Docker context (or DOCKER_CONTEXT / DOCKER_HOST).' \
+    'Use --installer for an explicit installer, e.g. from a release bundle.'
+}
+
+# Directory and manifest selection never fall back to the invoking cwd.
+root="${BAWTHUB_DIR:-$HOME/bawthub}"
+packaged_release="${BAWTHUB_PACKAGED_RELEASE:-}"
+manifest="${TENANT_ENV:-}"
+context="${DOCKER_CONTEXT:-}"
+installer=""
+explicit_installer=0
+while (( $# )); do
+  case "$1" in
+    --dir|--manifest|--context|--installer)
+      if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then die "$1 needs a value"; fi
+      case "$1" in
+        --dir) root="$2" ;;
+        --manifest) manifest="$2" ;;
+        --context) context="$2" ;;
+        --installer) installer="$2"; explicit_installer=1 ;;
+      esac
+      shift 2 ;;
+    help|-h|--help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+if (( $# == 0 )); then usage; exit 0; fi
+cmd="$1"; shift
+case "$cmd" in
+  start|stop|restart|status|setup) (( $# == 0 )) || die "$cmd takes no arguments" ;;
+  logs)
+    for (( i=1; i<=$#; i++ )); do
+      arg="${!i}"
+      case "$arg" in
+        -f|--follow) ;;
+        --tail)
+          i=$((i + 1))
+          if (( i > $# )) || [[ ! "${!i}" =~ ^[0-9]+$ && "${!i}" != all ]]; then
+            die '--tail needs a nonnegative line count or all'
+          fi ;;
+        *) [[ "$arg" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die 'logs only accepts --tail N, --follow or service names' ;;
+      esac
+    done ;;
+  install|configure|update|uninstall) ;;
+  *) usage >&2; die "unknown command: $cmd" ;;
+esac
+
+[[ "$root" == /* ]] || root="$PWD/$root"
+while [[ "$root" != / && "$root" == */ ]]; do root="${root%/}"; done
+if [[ -d "$root" ]]; then root="$(cd "$root" && pwd -P)"; fi
+[[ "$root" != / ]] || die 'choose a BawtHub installation directory, not /'
+[[ -n "$manifest" ]] || manifest="$root/deploy/tenant.env"
+[[ "$manifest" == /* ]] || manifest="$PWD/$manifest"
+if [[ -d "$(dirname "$manifest")" ]]; then
+  manifest="$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")"
+fi
+for path in "$root" "$manifest"; do
+  case "$path" in *'|'*|*','*|*$'\n'*|*$'\r'*) die 'installation and manifest paths cannot contain comma, pipe or a line break' ;; esac
+done
+
+# An inherited Compose project must not retarget a manifest without a name.
+# Persist names in the manifests of non-default tenants, as the installer does.
+unset TENANT_NAME COMPOSE_PROJECT_NAME
+case "$cmd" in
+  start|stop|restart|status|logs)
+    unset COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES
+    export COMPOSE_DISABLE_ENV_FILE=1 ;;
+esac
+[[ "$cmd" != status || -f "$manifest" ]] || { printf 'No BawtHub install at %s. Run bh install.\n' "$root"; exit 0; }
+command -v docker >/dev/null || die 'Install Docker Desktop on macOS or Docker Engine with Compose v2 on Linux.'
+if [[ -n "$context" ]]; then
+  unset DOCKER_HOST
+  export DOCKER_CONTEXT="$context"
+elif [[ -z "${DOCKER_HOST:-}" ]]; then
+  export DOCKER_CONTEXT
+  DOCKER_CONTEXT="$(docker context show)" || die 'cannot determine the current Docker context'
+  [[ -n "$DOCKER_CONTEXT" ]] || die 'Docker did not report a context name'
+fi
+
+project_for() {
+  local paths project
+  paths="$(TENANT_ENV="$1" bash "$root/deploy/bootstrap.sh" paths)" || return 1
+  project="$(printf '%s\n' "$paths" | sed -n 's/^PROJECT=//p')"
+  [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,47}$ ]] || return 1
+  printf '%s\n' "$project"
+}
+
+# An explicit project name lets Compose reuse the installed project model and
+# dependency labels without re-reading YAML/env, resolving images or creating
+# containers. Check origin labels first: project names alone are not unique
+# across checkouts. Compose-generated one-offs get the same origin labels.
+inspect_project() {
+  local rows id workdir files bound state oneoff
+  local format='{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "io.bawthub.tenant-manifest"}}|{{.State}}|{{.Label "com.docker.compose.oneoff"}}'
+  rows="$(docker ps --all --no-trunc --filter "label=com.docker.compose.project=$project" --format "$format")" \
+    || die 'could not inspect the selected Docker project'
+  remaining=() active=0 services=0
+  while IFS='|' read -r id workdir files bound state oneoff; do
+    [[ -n "$id" ]] || continue
+    [[ "$id" =~ ^[0-9a-f]{64}$ && "$workdir" == "$root/deploy/compose" && ( "$files" == "$base" || "$files" == "$base,"* ) ]] \
+      || die "project '$project' has containers from another installation or without installer labels; nothing selected"
+    [[ -z "$bound" || "$bound" == "$manifest" ]] \
+      || die "project '$project' belongs to another manifest; nothing selected"
+    case "$oneoff" in False|false) services=$((services + 1)) ;; esac
+    case "$state" in exited|created|dead) ;; *) remaining+=("$id"); active=$((active + 1)) ;; esac
+  done <<< "$rows"
+}
+
+compose_project() { docker compose --project-name "$project" "$@"; }
+stop_project() {
+  if (( services )); then compose_project stop; fi
+  inspect_project
+  # Compose stop excludes one-off containers. Stop any remainder by a checked
+  # immutable ID, without removing it or its mounts, even if its service was removed.
+  if (( active )); then docker stop "${remaining[@]}" >/dev/null; fi
+  inspect_project
+  (( active == 0 )) || die "project '$project' still has active containers"
+}
+start_project() {
+  (( services )) || die "project '$project' has no installed service containers; use bh setup to install or repair"
+  compose_project start
+}
+
+project=""
+base="$root/deploy/compose/docker-compose.base.yml"
+if [[ -f "$manifest" ]]; then
+  [[ -f "$root/deploy/bootstrap.sh" ]] || die "no bootstrap at $root/deploy/bootstrap.sh (select the installation with --dir)"
+  project="$(project_for "$manifest")" || die "could not resolve the installed project from $manifest"
+  default_manifest="$root/deploy/tenant.env"
+  if [[ "$manifest" != "$default_manifest" ]]; then
+    [[ "$project" != bawthub ]] || die 'a separate manifest must use its own TENANT_NAME, not bawthub'
+    if [[ -f "$default_manifest" ]]; then
+      default_project="$(project_for "$default_manifest")" || die 'cannot rule out a project collision with the default manifest'
+      [[ "$project" != "$default_project" ]] || die "both manifests select project '$project'; use a distinct TENANT_NAME for each tenant"
+    fi
+  fi
+  inspect_project
+fi
+
+case "$cmd" in
+  start|stop|restart|status|logs)
+    [[ -n "$project" ]] || die "manifest not found: $manifest (select the installation with --dir or --manifest)"
+    printf 'BawtHub project: %s (%s)\n' "$project" "${DOCKER_CONTEXT:-DOCKER_HOST}" >&2
+    case "$cmd" in
+      start) start_project ;;
+      stop) stop_project ;;
+      restart) stop_project; start_project ;;
+      status)
+        if (( services == 0 && ${#remaining[@]} == 0 )); then
+          printf 'No service containers installed for %s.\n' "$project"
+        elif (( active == 0 )); then
+          printf 'Stopped.\n'
+        fi
+        docker ps --all --filter "label=com.docker.compose.project=$project" \
+          --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' ;;
+      logs) compose_project logs "$@" ;;
+    esac ;;
+  setup|install|configure|update|uninstall)
+    if [[ -n "$packaged_release" && ( -e "$root/.git" || -L "$root/.git" ) ]]; then
+      case "$cmd" in install|update|setup) die 'Refusing to install over a Git checkout; use a separate installation directory.' ;; esac
+    fi
+    if (( ! explicit_installer )); then
+      installer="$root/deploy/install.sh"
+      case "$cmd" in
+        install|update|setup) [[ -z "$packaged_release" ]] || installer="$packaged_release/install.sh" ;;
+      esac
+      if [[ ! -f "$installer" && -z "$packaged_release" ]]; then installer="$(dirname "${BASH_SOURCE[0]}")/install.sh"; fi
+    fi
+    [[ -f "$installer" ]] || die 'no installer found; pass --installer /path/to/install.sh'
+    case "$cmd" in
+      configure|update|uninstall) [[ -n "$project" ]] || die "manifest not found: $manifest" ;;
+      setup|install) [[ -n "$project" || "$manifest" == "$root/deploy/tenant.env" ]] \
+        || die 'prepare the separate manifest before invoking the installer' ;;
+    esac
+    if [[ "$cmd" == setup ]]; then
+      if [[ "${BAWTHUB_NONINTERACTIVE:-0}" == 1 ]] || ! ( : </dev/tty ) 2>/dev/null; then
+        die 'setup needs an interactive terminal; use an explicit installer action in scripts'
+      fi
+    fi
+    if [[ -z "$project" ]]; then
+      # A fresh stock manifest uses bawthub. BAWTHUB_DIR alone is not isolation.
+      project=bawthub
+      inspect_project
+      volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" \
+        || die 'could not inspect existing Docker volumes'
+      [[ $services == 0 && $active == 0 && -z "$volumes" ]] \
+        || die 'the Docker context already has a bawthub project or its volumes; choose a separate manifest or context'
+    fi
+    export BAWTHUB_DIR="$root" TENANT_ENV="$manifest"
+    if [[ "$cmd" == setup ]]; then exec bash "$installer"; fi
+    exec bash "$installer" "$cmd" "$@" ;;
+esac

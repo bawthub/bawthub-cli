@@ -1,0 +1,57 @@
+# Development tenant, optional frontend half (TASK-347): Vite HMR + Hono from
+# a VM-local bawthub frontend/ checkout instead of the pinned image. bootstrap
+# adds this after docker-compose.dev.yml only when MODE=dev and
+# DEV_FRONTEND_SOURCE_DIR is set. Same tenant database, env and volumes as the
+# image; only the code source and the ports inside the container differ.
+services:
+  frontend:
+    image: localhost/bawthub/frontend-dev:${TENANT_NAME:-bawthub}
+    # Rebuilt from the mounted checkout on every up (layer cache makes an
+    # unchanged Dockerfile/lockfile a no-op), never pulled.
+    pull_policy: build
+    build:
+      context: ${DEV_FRONTEND_SOURCE_DIR:?set the VM-local bawthub frontend directory}
+      dockerfile: hot-reloading.Dockerfile
+    # Syncs the node_modules volume when dependency inputs changed, then runs
+    # Vite (5173, HMR) and Hono (public API 3001, internal 3002).
+    command: ["sh", "scripts/dev-deps-sync.sh", "pnpm", "dev"]
+    environment:
+      # Without this pnpm puts its store at /app/.pnpm-store, inside the
+      # watched source tree, and Vite exhausts the guest's inotify watches.
+      # The node_modules volume keeps hardlinks on one filesystem and is
+      # outside Vite's watcher.
+      - npm_config_store_dir=/app/node_modules/.pnpm-store
+    # The dev server waits for a file change after a crash instead of
+    # exiting, so Hono must not start before the app exports its service
+    # token.
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ${DEV_FRONTEND_SOURCE_DIR}:/app
+      - dev-frontend-node-modules:/app/node_modules
+      - dev-frontend-vite-cache:/app/node_modules/.vite
+      # STORAGE_BACKEND=fs blobs stay out of the synced source tree.
+      - dev-frontend-storage:/app/storage
+    # Browsers reach Vite, which proxies /api to Hono in the same container.
+    ports: !override
+      - "${FRONTEND_PORT:-3000}:5173"
+    healthcheck:
+      # The first start may install dependencies before Vite listens.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "-m", "5", "http://localhost:3001/api/health"]
+      interval: 15s
+      timeout: 8s
+      retries: 3
+      start_period: 300s
+
+  app:
+    environment:
+      # The image serves its public API on 3000; the dev container's Hono
+      # listens on 3001 (3002, the internal API, is unchanged).
+      - LLM_BAWT_TASK_API_URL=http://frontend:3001
+      - BAWTHUB_UPLOADS_INTERNAL_URL=http://frontend:3001
+
+volumes:
+  dev-frontend-node-modules:
+  dev-frontend-vite-cache:
+  dev-frontend-storage:

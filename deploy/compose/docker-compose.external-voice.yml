@@ -1,0 +1,6 @@
+# External voice API must implement /v1/tts/* and WebSocket endpoints.
+# Hono proxies same-origin /api/v1/* without baking an external host into JS.
+services:
+  frontend:
+    environment:
+      - BAWTHUB_VOICE_BACKEND_URL=${EXTERNAL_VOICE_URL:?set EXTERNAL_VOICE_URL for VOICE=external}

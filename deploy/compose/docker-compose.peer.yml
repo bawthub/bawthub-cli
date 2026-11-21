@@ -1,0 +1,11 @@
+# Peer networking between installs (opt-in). bootstrap.sh adds this file only
+# when tenant.env sets LLM_BAWT_PEER_PORT; the app reads LLM_BAWT_PEER_PORT,
+# LLM_BAWT_PEER_PUBLIC_URL and LLM_BAWT_PEER_LABEL from tenant.env.
+#
+# The listener serves HTTPS with a self-signed certificate made from this
+# install's identity key, which peers pin at pairing. Publish it on a LAN or
+# VPN address only (LLM_BAWT_PEER_BIND_IP), never through public ingress.
+services:
+  app:
+    ports:
+      - "${LLM_BAWT_PEER_BIND_IP:?set the LAN address to publish the peer port on}:${LLM_BAWT_PEER_PORT}:${LLM_BAWT_PEER_PORT}"

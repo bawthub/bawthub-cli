@@ -1,0 +1,65 @@
+# Default CPU tenant voice: pinned published images, no host bind mounts.
+# Pocket's non-cloning model and matching published Alba preset download into
+# a writable, persistent named HF cache; failures remain unhealthy (not Moshi).
+services:
+  app:
+    environment:
+      # Same reader group as house previews; frontend retains UID 1001 access.
+      # Export atomically as 0640 even when HOUSES=0.
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_GID=1000
+
+  pocket-tts:
+    image: ${POCKET_IMAGE_REF:?set published ghcr.io/bawthub/pocket-tts@sha256 digest}
+    dns_search: ["."]  # TASK-1561, see docker-compose.base.yml
+    environment:
+      - POCKET_MODEL_MODE=preset
+      - POCKET_CACHE_DIR=/var/cache/pocket-tts
+      - HF_HOME=/var/cache/pocket-tts
+    volumes:
+      - pocket-model-cache:/var/cache/pocket-tts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; h=json.load(urllib.request.urlopen('http://localhost:8091/health',timeout=3)); assert h['model_ready'] and h['preset_available'] and not h['cloning_available']"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10m
+      retries: 3
+    restart: unless-stopped
+
+  voice-backend:
+    image: ${VOICE_BACKEND_IMAGE_REF:?set published ghcr.io/bawthub/voice-backend@sha256 digest}
+    dns_search: ["."]  # TASK-1561, see docker-compose.base.yml
+    group_add: ["1000"]  # Read the proxy credential without changing image UID.
+    environment:
+      - DATABASE_URL=${VOICE_DATABASE_URL:?set by bootstrap}
+      - BAWTHUB_LLM_URL=http://app:8642
+      - BAWTHUB_TTS_DEFAULT_PROVIDER=pocket
+      - BAWTHUB_STT_URL=ws://unavailable-stt:8080
+      - BAWTHUB_TTS_URL=ws://unavailable-tts:8080
+      # Only the frontend proxy may reach voice routes (TASK-2235).
+      - BAWTHUB_SERVICE_TOKEN_FILE=/run/bawthub-service-token/token
+      - BAWTHUB_VOICE_REQUIRE_PROXY_TOKEN_FILE=/run/bawthub-service-token/token
+      - BAWTHUB_VOICE_PROXY_AUTH_MODE=${BAWTHUB_VOICE_PROXY_AUTH_MODE-legacy}
+      # This caller's llm-bawt API key (TASK-2380); 0640, group 1000.
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-key/api-key
+    volumes:
+      - service-token:/run/bawthub-service-token:ro
+      - api-key-voice:/run/llm-bawt-api-key:ro
+    depends_on:
+      app:
+        condition: service_started
+      pocket-tts:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    environment:
+      - BAWTHUB_VOICE_BACKEND_URL=http://voice-backend:80
+      # Bundled backend only; external-voice never sets this (TASK-2235).
+      - BAWTHUB_VOICE_PROXY_TOKEN_FILE=/run/bawthub-service-token/token
+      - BAWTHUB_VOICE_PROXY_AUTH_MODE=${BAWTHUB_VOICE_PROXY_AUTH_MODE-legacy}
+    depends_on:
+      voice-backend:
+        condition: service_started
+
+volumes:
+  pocket-model-cache:

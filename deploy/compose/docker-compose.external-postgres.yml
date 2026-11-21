@@ -1,0 +1,21 @@
+# docker-compose.external-postgres.yml — EXTERNAL postgres overlay.
+#
+# The codified inst1 snowflake. Included when EXTERNAL_POSTGRES_* is set;
+# localdb.yml is then OMITTED (no local pgvector, no orphan). Repoints the app
+# at the external DB and the frontend at its own external DATABASE_URL (which
+# may be a DIFFERENT DB than the app's). These inline `environment:` values
+# override base.yml's — env_file could not, which is the gotcha this encodes.
+
+services:
+  app:
+    environment:
+      - LLM_BAWT_POSTGRES_HOST=${EXTERNAL_POSTGRES_HOST:?set EXTERNAL_POSTGRES_HOST in tenant.env}
+      - LLM_BAWT_POSTGRES_PORT=${EXTERNAL_POSTGRES_PORT:-5432}
+      - LLM_BAWT_POSTGRES_USER=${EXTERNAL_POSTGRES_USER:?set EXTERNAL_POSTGRES_USER in tenant.env}
+      - LLM_BAWT_POSTGRES_PASSWORD=${EXTERNAL_POSTGRES_PASSWORD:?set EXTERNAL_POSTGRES_PASSWORD in tenant.env}
+      - LLM_BAWT_POSTGRES_DATABASE=${EXTERNAL_POSTGRES_DATABASE:?set EXTERNAL_POSTGRES_DATABASE in tenant.env}
+
+  frontend:
+    environment:
+      # URL-encode special chars in the password (e.g. # -> %23).
+      - DATABASE_URL=${EXTERNAL_FRONTEND_DATABASE_URL:?set EXTERNAL_FRONTEND_DATABASE_URL in tenant.env}
