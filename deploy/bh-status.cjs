@@ -15,7 +15,8 @@ const groupFor = (service) => /^house-h\d+$/.test(service) ? "Agents" :
   Object.keys(groups).find((group) => Object.hasOwn(groups[group], service)) ?? "Other services";
 const labelFor = (group, service) => groups[group]?.[service] ??
   (/^house-h\d+$/.test(service) ? `Agent workspace ${service.slice(6)}` : service);
-const format = '[{{json .Id}},{{json (index .Config.Labels "com.docker.compose.service")}},{{json .State.Status}},{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},{{json .State.ExitCode}},{{json (index .HostConfig.PortBindings "3000/tcp")}}]';
+// Docker omits Health entirely when a container has no health check.
+const format = '[{{json .Id}},{{json (index .Config.Labels "com.docker.compose.service")}},{{json .State.Status}},{{with index .State "Health"}}{{json .Status}}{{else}}null{{end}},{{json .State.ExitCode}},{{with index .HostConfig "PortBindings"}}{{json (index . "3000/tcp")}}{{else}}null{{end}}]';
 
 const probes = {
   frontend: ["curl", "--noproxy", "*", "-fsS", "--max-time", "5", "http://localhost:3000/api/health"],
