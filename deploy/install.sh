@@ -570,8 +570,20 @@ prepare_manifest() {
 if [[ ! -f "$env_file" ]]; then
   # The local database password is not written here: bootstrap generates it on
   # the first `up` and keeps it in deploy/.postgres-password (0600).
-  ( umask 077; cp "$DIR/deploy/tenant.env.example" "$env_file.tmp" && mv "$env_file.tmp" "$env_file" ) \
-    || die "could not create $env_file"
+  local project="${BAWTHUB_CLI_INITIAL_PROJECT:-}" port="${BAWTHUB_CLI_INITIAL_PORT:-}" tmp="$env_file.install-$$"
+  if [[ -n "${BAWTHUB_PACKAGED_RELEASE:-}" && -n "$project" ]]; then
+    [[ "$project" =~ ^bawthub-cli-[0-9a-f]{12}$ && "$port" =~ ^30(0[0-9]|1[0-9]|20)$ ]] \
+      || die 'Invalid initial CLI project or port.'
+    ( umask 077; awk -v project="$project" -v port="$port" '
+        /^TENANT_NAME=/ || /^FRONTEND_PORT=/ {next}
+        {print}
+        END {print "TENANT_NAME=" project; print "FRONTEND_PORT=" port}
+      ' "$DIR/deploy/tenant.env.example" > "$tmp" && mv "$tmp" "$env_file" ) \
+        || die "could not create $env_file"
+  else
+    ( umask 077; cp "$DIR/deploy/tenant.env.example" "$tmp" && mv "$tmp" "$env_file" ) \
+      || die "could not create $env_file"
+  fi
   log "created $env_file from tenant.env.example"
   first_install_parts
 else

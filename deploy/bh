@@ -79,7 +79,7 @@ done
 
 # An inherited Compose project must not retarget a manifest without a name.
 # Persist names in the manifests of non-default tenants, as the installer does.
-unset TENANT_NAME COMPOSE_PROJECT_NAME
+unset TENANT_NAME COMPOSE_PROJECT_NAME BAWTHUB_CLI_INITIAL_PROJECT BAWTHUB_CLI_INITIAL_PORT
 case "$cmd" in
   start|stop|restart|status|logs)
     unset COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES
@@ -113,9 +113,10 @@ inspect_project() {
   local format='{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "io.bawthub.tenant-manifest"}}|{{.State}}|{{.Label "com.docker.compose.oneoff"}}'
   rows="$(docker ps --all --no-trunc --filter "label=com.docker.compose.project=$project" --format "$format")" \
     || die 'could not inspect the selected Docker project'
-  remaining=() active=0 services=0
+  remaining=() active=0 services=0 containers=0
   while IFS='|' read -r id workdir files bound state oneoff; do
     [[ -n "$id" ]] || continue
+    containers=$((containers + 1))
     [[ "$id" =~ ^[0-9a-f]{64}$ && "$workdir" == "$root/deploy/compose" && ( "$files" == "$base" || "$files" == "$base,"* ) ]] \
       || die "project '$project' has containers from another installation or without installer labels; nothing selected"
     [[ -z "$bound" || "$bound" == "$manifest" ]] \
@@ -138,6 +139,32 @@ stop_project() {
 start_project() {
   (( services )) || die "project '$project' has no installed service containers; use bh setup to install or repair"
   compose_project start
+}
+
+# Check Docker publications (including ranged mappings) and other local
+# listeners. Docker is still the final arbiter when it binds the saved port.
+choose_web_port() {
+  local published
+  published="$(docker ps --format '{{.Ports}}')" || return 1
+  node - "$published" <<'NODE'
+const net = require('node:net');
+const ranges = [...process.argv[2].matchAll(/:(\d+)(?:-(\d+))?->\d+(?:-\d+)?\/tcp\b/g)];
+function available(port, host) {
+  return new Promise((resolve) => {
+    const server = net.createServer(socket => socket.destroy());
+    server.once('error', ({ code }) => resolve(host === '::' && ['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(code)
+      ? available(port, '0.0.0.0') : false));
+    server.listen({ port, host }, () => server.close(() => resolve(true)));
+  });
+}
+(async () => {
+  for (let port = 3000; port <= 3020; port++) {
+    if (ranges.some(([, lo, hi]) => port >= +lo && port <= +(hi || lo))) continue;
+    if (await available(port, '::')) { console.log(port); return; }
+  }
+  process.exitCode = 1;
+})();
+NODE
 }
 
 project=""
@@ -197,13 +224,26 @@ case "$cmd" in
       fi
     fi
     if [[ -z "$project" ]]; then
-      # A fresh stock manifest uses bawthub. BAWTHUB_DIR alone is not isolation.
       project=bawthub
+      if [[ -n "$packaged_release" && $explicit_installer == 0 ]]; then
+        # Old standalone installs use bawthub. Give each CLI root a separate
+        # project and persist it in the manifest before bootstrap runs.
+        project="$(node -p '"bawthub-cli-" + require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0, 12)' "$root")" \
+          || die 'could not derive the CLI project name'
+      fi
       inspect_project
       volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" \
         || die 'could not inspect existing Docker volumes'
-      [[ $services == 0 && $active == 0 && -z "$volumes" ]] \
-        || die 'the Docker context already has a bawthub project or its volumes; choose a separate manifest or context'
+      [[ $containers == 0 && -z "$volumes" ]] \
+        || die "the Docker context already has project '$project' or its volumes, but no manifest was selected. Choose another install directory or context."
+      if [[ "$project" != bawthub ]]; then
+        BAWTHUB_CLI_INITIAL_PORT="$(choose_web_port)" \
+          || die 'could not find a free web port in 3000–3020; make one available and rerun bh install'
+        export BAWTHUB_CLI_INITIAL_PROJECT="$project" BAWTHUB_CLI_INITIAL_PORT
+        if [[ "$BAWTHUB_CLI_INITIAL_PORT" != 3000 ]]; then
+          printf 'Port 3000 is in use; using %s for this new installation.\n' "$BAWTHUB_CLI_INITIAL_PORT" >&2
+        fi
+      fi
     fi
     export BAWTHUB_DIR="$root" TENANT_ENV="$manifest"
     if [[ "$cmd" == setup ]]; then exec bash "$installer"; fi
