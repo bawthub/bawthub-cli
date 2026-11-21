@@ -657,7 +657,7 @@ plan_update() {
   fi
   (( ${#CUSTOM_PINS[@]} == 0 )) || log "keeping your custom images: ${CUSTOM_PINS[*]}"
   (( ${#OFF_PINS[@]} == 0 )) || log "keeping turned-off parts off: ${OFF_PINS[*]}"
-  if [[ ! -s "$UPDATE_PLAN" ]]; then log "BawtHub is up to date"; fi
+  if [[ ! -s "$UPDATE_PLAN" ]]; then log "Service image versions are unchanged; checking the installation"; fi
 }
 
 choose_update() {
@@ -1242,8 +1242,6 @@ finish() {
     else
       printf '  Owner setup: %s/setup\n  Setup code is in: %s\n' "$url" "$code_file"
     fi
-  else
-    printf '  Sign in, or continue setup: %s/setup\n' "$url"
   fi
   sign_in_summary "$url"
   printf '  Log: %s\n  +-----------------------------------------------+\n' "$LOG_FILE"

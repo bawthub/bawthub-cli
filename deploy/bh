@@ -10,7 +10,8 @@ usage() {
     'Usage: bh [--dir DIR] [--manifest FILE] [--context NAME] COMMAND' \
     '       bh [--dir DIR] [--manifest FILE] [--context NAME] [--installer FILE] ACTION [OPTIONS]' \
     '' \
-    '  start | stop | restart | status   Use existing containers; keep all data' \
+    '  start | stop | restart           Use existing containers; keep all data' \
+    '  status                          Show service and endpoint health' \
     '  logs [-f] [--tail N] [SERVICE...]  Show logs (including stopped services)' \
     '  setup | install | configure | update | uninstall   Run the existing installer' \
     '  install --bundle DIR | update --bundle DIR      Use a local release bundle' \
@@ -114,7 +115,7 @@ inspect_project() {
   local format='{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "io.bawthub.tenant-manifest"}}|{{.State}}|{{.Label "com.docker.compose.oneoff"}}'
   rows="$(docker ps --all --no-trunc --filter "label=com.docker.compose.project=$project" --format "$format")" \
     || die 'could not inspect the selected Docker project'
-  remaining=() active=0 services=0 containers=0
+  remaining=() status_ids=() active=0 services=0 containers=0
   while IFS='|' read -r id workdir files bound state oneoff; do
     [[ -n "$id" ]] || continue
     containers=$((containers + 1))
@@ -122,7 +123,11 @@ inspect_project() {
       || die "project '$project' has containers from another installation or without installer labels; nothing selected"
     [[ -z "$bound" || "$bound" == "$manifest" ]] \
       || die "project '$project' belongs to another manifest; nothing selected"
-    case "$oneoff" in False|false) services=$((services + 1)) ;; esac
+    case "$oneoff" in
+      False|false)
+        services=$((services + 1))
+        if [[ "$cmd" == status ]]; then status_ids+=("$id"); fi ;;
+    esac
     case "$state" in exited|created|dead) ;; *) remaining+=("$id"); active=$((active + 1)) ;; esac
   done <<< "$rows"
 }
@@ -187,19 +192,20 @@ fi
 case "$cmd" in
   start|stop|restart|status|logs)
     [[ -n "$project" ]] || die "manifest not found: $manifest (select the installation with --dir or --manifest)"
-    printf 'BawtHub project: %s (%s)\n' "$project" "${DOCKER_CONTEXT:-DOCKER_HOST}" >&2
+    if [[ "$cmd" != status ]]; then
+      printf 'BawtHub project: %s (%s)\n' "$project" "${DOCKER_CONTEXT:-DOCKER_HOST}" >&2
+    fi
     case "$cmd" in
       start) start_project ;;
       stop) stop_project ;;
       restart) stop_project; start_project ;;
       status)
-        if (( services == 0 && ${#remaining[@]} == 0 )); then
-          printf 'No service containers installed for %s.\n' "$project"
-        elif (( active == 0 )); then
-          printf 'Stopped.\n'
+        status_renderer="$(dirname "${BASH_SOURCE[0]}")/bh-status.cjs"
+        command -v node >/dev/null || die 'Node.js 20 or later is required for bh status.'
+        if (( services )); then
+          exec node "$status_renderer" "$project" "${DOCKER_CONTEXT:-DOCKER_HOST}" "${status_ids[@]}"
         fi
-        docker ps --all --filter "label=com.docker.compose.project=$project" \
-          --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' ;;
+        exec node "$status_renderer" "$project" "${DOCKER_CONTEXT:-DOCKER_HOST}" ;;
       logs) compose_project logs "$@" ;;
     esac ;;
   setup|install|configure|update|uninstall)

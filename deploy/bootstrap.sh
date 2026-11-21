@@ -1474,7 +1474,7 @@ case "$ACTION" in
       log "pulling published images (local builds are already present)…"
       compose pull --policy missing
     elif [[ "$MODE" == "prod" ]]; then
-      step "Downloading BawtHub (a few GB the first time; this can take a while)"
+      step "Checking BawtHub images (Docker reuses cached layers)"
       resolve_published_images
       log "pulling images…"
       if (( PULL_MISSING_ONLY )); then compose pull --policy missing; else compose pull; fi
