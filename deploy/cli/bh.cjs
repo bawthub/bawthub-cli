@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
-const { mkdtempSync, realpathSync, rmSync, writeFileSync } = require('node:fs');
+const { accessSync, constants, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } = require('node:fs');
 const { homedir, tmpdir } = require('node:os');
 const { isAbsolute, join, resolve } = require('node:path');
 const pkg = require('./package.json');
@@ -22,7 +22,15 @@ function isOnlineUpdate() {
     if (!args[i + 1] || args[i + 1].startsWith('--') || args[i] === '--installer') return false;
     i += 2;
   }
-  return args[i] === 'update' && !args.slice(i + 1).includes('--bundle');
+  if (args[i] !== 'update') return false;
+  for (i++; i < args.length; i += 2) {
+    if (args[i] !== '--bot-pack' || !args[i + 1] || args[i + 1].startsWith('--')) return false;
+    try {
+      accessSync(args[i + 1], constants.R_OK);
+      if (!statSync(args[i + 1]).isFile()) return false;
+    } catch { return false; }
+  }
+  return true;
 }
 
 async function get(url, label) {
@@ -32,8 +40,15 @@ async function get(url, label) {
 }
 
 async function updateCli(env) {
-  const meta = await get(`https://api.github.com/repos/${repo}/releases/latest`, 'checking the CLI release');
-  const { tag_name: tag, assets } = await meta.json();
+  let release;
+  try {
+    const meta = await get(`https://api.github.com/repos/${repo}/releases/latest`, 'checking the CLI release');
+    release = await meta.json();
+  } catch (err) {
+    console.error(`bh: could not check for a new CLI (${err.message}); using ${pkg.version}.`);
+    return undefined;
+  }
+  const { tag_name: tag, assets } = release;
   const version = /^v(\d{1,6}\.\d{1,6}\.\d{1,6})$/.exec(tag)?.[1];
   if (!version) throw new Error('the latest CLI release does not have a stable version tag');
   const current = pkg.version.split('.').map(Number);
@@ -86,14 +101,18 @@ async function main() {
   const env = { ...process.env };
   const alreadyUpdated = env.BAWTHUB_CLI_JUST_UPDATED === '1';
   delete env.BAWTHUB_CLI_JUST_UPDATED;
-  if (!alreadyUpdated && isOnlineUpdate()) {
-    const status = await updateCli(env);
-    if (status !== undefined) return status;
-  }
+  delete env.BAWTHUB_CLI_CHECK_UPDATE_TARGET;
   const dataHome = env.XDG_DATA_HOME || '';
   env.BAWTHUB_DIR ||= join(isAbsolute(dataHome) ? dataHome : join(homedir(), '.local', 'share'), 'bawthub', 'tenant');
   env.BAWTHUB_PACKAGED_RELEASE = join(__dirname, 'release');
-  return run('bash', [join(__dirname, 'bh.sh'), ...args], env);
+  const argv = [join(__dirname, 'bh.sh'), ...args];
+  if (!alreadyUpdated && isOnlineUpdate()) {
+    const checked = run('bash', argv, { ...env, BAWTHUB_CLI_CHECK_UPDATE_TARGET: '1' });
+    if (checked !== 0) return checked;
+    const status = await updateCli(env);
+    if (status !== undefined) return status;
+  }
+  return run('bash', argv, env);
 }
 
 main().then(status => { process.exitCode = status; }).catch(err => {

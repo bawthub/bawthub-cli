@@ -245,6 +245,7 @@ case "$cmd" in
         fi
       fi
     fi
+    if [[ "$cmd" == update && "${BAWTHUB_CLI_CHECK_UPDATE_TARGET:-0}" == 1 ]]; then exit 0; fi
     export BAWTHUB_DIR="$root" TENANT_ENV="$manifest"
     if [[ "$cmd" == setup ]]; then exec bash "$installer"; fi
     exec bash "$installer" "$cmd" "$@" ;;
