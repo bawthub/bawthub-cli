@@ -12,6 +12,7 @@ usage() {
     '' \
     '  start | stop | restart           Use existing containers; keep all data' \
     '  status                          Show service and endpoint health' \
+    '  version [--offline]             Compare installed versions with the latest release' \
     '  logs [-f] [--tail N] [SERVICE...]  Show logs (including stopped services)' \
     '  setup | install | configure | update | uninstall   Run the existing installer' \
     '  install --bundle DIR | update --bundle DIR      Use a local release bundle' \
@@ -48,7 +49,8 @@ done
 if (( $# == 0 )); then usage; exit 0; fi
 cmd="$1"; shift
 case "$cmd" in
-  start|stop|restart|status|setup) (( $# == 0 )) || die "$cmd takes no arguments" ;;
+  start|stop|restart|status|setup|_version-inventory) (( $# == 0 )) || die "$cmd takes no arguments" ;;
+  version) [[ $# == 0 || ( $# == 1 && "$1" == --offline ) ]] || die 'usage: bh version [--offline]' ;;
   logs)
     for (( i=1; i<=$#; i++ )); do
       arg="${!i}"
@@ -83,10 +85,14 @@ done
 # Persist names in the manifests of non-default tenants, as the installer does.
 unset TENANT_NAME COMPOSE_PROJECT_NAME BAWTHUB_CLI_INITIAL_PROJECT BAWTHUB_CLI_INITIAL_PORT
 case "$cmd" in
-  start|stop|restart|status|logs)
+  start|stop|restart|status|logs|version|_version-inventory)
     unset COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES
     export COMPOSE_DISABLE_ENV_FILE=1 ;;
 esac
+if [[ "$cmd" == version ]]; then
+  command -v node >/dev/null || die 'Node.js 20 or later is required for bh version.'
+  exec node "$(dirname "${BASH_SOURCE[0]}")/bh-version.cjs" "${BASH_SOURCE[0]}" "$root" "$manifest" "$context" "$@"
+fi
 [[ "$cmd" != status || -f "$manifest" ]] || { printf 'No BawtHub install at %s. Run bh install.\n' "$root"; exit 0; }
 command -v docker >/dev/null || die 'Install Docker Desktop on macOS or Docker Engine with Compose v2 on Linux.'
 if [[ -n "$context" ]]; then
@@ -126,7 +132,7 @@ inspect_project() {
     case "$oneoff" in
       False|false)
         services=$((services + 1))
-        if [[ "$cmd" == status ]]; then status_ids+=("$id"); fi ;;
+        if [[ "$cmd" == status || "$cmd" == _version-inventory ]]; then status_ids+=("$id"); fi ;;
     esac
     case "$state" in exited|created|dead) ;; *) remaining+=("$id"); active=$((active + 1)) ;; esac
   done <<< "$rows"
@@ -190,6 +196,11 @@ if [[ -f "$manifest" ]]; then
 fi
 
 case "$cmd" in
+  _version-inventory)
+    [[ -n "$project" ]] || die "manifest not found: $manifest"
+    if (( services )); then
+      exec docker container inspect --format '[{{json (index .Config.Labels "com.docker.compose.service")}},{{json .Config.Image}},{{json .Image}}]' "${status_ids[@]}"
+    fi ;;
   start|stop|restart|status|logs)
     [[ -n "$project" ]] || die "manifest not found: $manifest (select the installation with --dir or --manifest)"
     if [[ "$cmd" != status ]]; then

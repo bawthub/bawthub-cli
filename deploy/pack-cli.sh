@@ -20,11 +20,13 @@ git_at show "$sha:deploy/cli/package.json" > "$stage/package.json"
 git_at show "$sha:deploy/cli/bh.cjs" > "$stage/bh.cjs"
 git_at show "$sha:deploy/bh" > "$stage/bh.sh"
 git_at show "$sha:deploy/bh-status.cjs" > "$stage/bh-status.cjs"
+git_at show "$sha:deploy/bh-version.cjs" > "$stage/bh-version.cjs"
 git_at show "$sha:deploy/install.sh" > "$stage/release/install.sh"
 chmod 755 "$stage/bh.cjs" "$stage/bh.sh" "$stage/release/install.sh"
 # A public CLI package must not include the upstream repository or host tooling.
 # Include optional runtime overlays and helpers only when present at this revision.
-paths=(LICENSE deploy/bh deploy/bh-status.cjs deploy/install.sh deploy/bootstrap.sh deploy/tenant.env.example)
+paths=(LICENSE deploy/bh deploy/bh-status.cjs deploy/bh-version.cjs deploy/cli/package.json
+  deploy/install.sh deploy/bootstrap.sh deploy/tenant.env.example)
 while IFS= read -r path; do
   paths+=("$path")
 done < <(git_at ls-tree -r --name-only "$sha" -- deploy/compose deploy/traefik/dynamic/routes.yml \

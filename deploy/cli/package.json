@@ -1,11 +1,11 @@
 {
   "name": "@bawthub/cli",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Install and manage a self-hosted BawtHub instance",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "bin": { "bh": "bh.cjs" },
-  "files": ["bh.cjs", "bh.sh", "bh-status.cjs", "release"],
+  "files": ["bh.cjs", "bh.sh", "bh-status.cjs", "bh-version.cjs", "release"],
   "os": ["darwin", "linux"],
   "engines": { "node": ">=20" }
 }
