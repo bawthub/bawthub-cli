@@ -3,7 +3,7 @@
 Install `bh` once on macOS or Linux with Node.js 20+ and npm:
 
 ```sh
-npm install -g https://github.com/bawthub/bawthub-cli/releases/download/v0.1.6/bawthub-cli-0.1.6.tgz
+npm install -g https://github.com/bawthub/bawthub-cli/releases/download/v0.1.7/bawthub-cli-0.1.7.tgz
 ```
 
 Then, with Docker Desktop (macOS) or Docker Engine and Compose v2 (Linux) running:
