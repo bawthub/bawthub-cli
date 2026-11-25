@@ -97,9 +97,14 @@ if [[ "$cmd" == version ]]; then
   command -v node >/dev/null || die 'Node.js 20 or later is required for bh version.'
   exec node "$(dirname "${BASH_SOURCE[0]}")/bh-version.cjs" "${BASH_SOURCE[0]}" "$root" "$manifest" "$context" "$@"
 fi
-if [[ "$cmd" == chat ]] && [[ " $* " == *" -h "* || " $* " == *" --help "* ]]; then
-  command -v node >/dev/null || die 'Node.js 20 or later is required for bh chat.'
-  exec node "$(dirname "${BASH_SOURCE[0]}")/bh-chat.cjs" chat "" --help
+if [[ "$cmd" == chat ]]; then
+  for arg in "$@"; do
+    [[ "$arg" != -- ]] || break
+    if [[ "$arg" == -h || "$arg" == --help ]]; then
+      command -v node >/dev/null || die 'Node.js 20 or later is required for bh chat.'
+      exec node "$(dirname "${BASH_SOURCE[0]}")/bh-chat.cjs" chat "" --help
+    fi
+  done
 fi
 [[ "$cmd" != status || -f "$manifest" ]] || { printf 'No BawtHub install at %s. Run bh install.\n' "$root"; exit 0; }
 command -v docker >/dev/null || die 'Install Docker Desktop on macOS or Docker Engine with Compose v2 on Linux.'

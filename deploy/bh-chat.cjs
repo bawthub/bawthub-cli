@@ -1,12 +1,10 @@
 "use strict";
 
 // bh chat / bh jobs / bh status --service: talk to the installed tenant's
-// llm-bawt API on its loopback port. The API key is read from the app
-// container (the operator already controls Docker) and held only in memory.
-const { execFile, spawnSync } = require("node:child_process");
-const { promisify } = require("node:util");
+// llm-bawt API from inside its app container, so the app's key never
+// leaves that container and calls reach the tenant bh selected.
+const { spawn, spawnSync } = require("node:child_process");
 const readline = require("node:readline");
-const run = promisify(execFile);
 
 const ADMISSION = ": llm-bawt-admission ";
 const EXTENSION = ": llm-bawt-event ";
@@ -18,35 +16,73 @@ const dim = (t) => paint("2", t);
 const warn = (t) => console.error(paint("33", t));
 class UsageError extends Error {}
 
-async function connect(container) {
-  const docker = async (...args) => (await run("docker", args, { timeout: 10000, maxBuffer: 1024 * 1024 })).stdout.trim();
-  let key;
-  try {
-    key = await docker("exec", container, "cat", "/run/llm-bawt-api-keys/app/api-key");
-  } catch {
-    throw new Error("could not read the API key from the app container; is BawtHub running? Try bh status.");
-  }
-  const binding = (await docker("port", container, "8642/tcp").catch(() => "")).split("\n")[0];
-  const port = /:(\d+)$/.exec(binding)?.[1];
-  if (!port) throw new Error("the app API port is not published on this host; check bh status.");
-  const base = `http://127.0.0.1:${port}`;
-  const request = async (method, path, { body, params, headers, timeout = 30000 } = {}) => {
-    const url = new URL(path, base);
+// Runs inside the selected app container (whatever Docker context bh chose):
+// reads the app's own key there, calls the API on the container's loopback,
+// follows no redirects, and streams "STATUS\n" then the raw response body.
+const PROXY = String.raw`
+import json, sys, urllib.request as u
+method, url, headers = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+with open("/run/llm-bawt-api-keys/app/api-key") as f:
+    headers["X-LLM-Bawt-Key"] = f.read().strip()
+class NoRedirect(u.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+body = sys.stdin.buffer.read() or None
+out = sys.stdout.buffer
+try:
+    res = u.build_opener(NoRedirect, u.ProxyHandler({})).open(u.Request(url, data=body, headers=headers, method=method))
+except u.HTTPError as err:
+    res = err
+out.write(b"%d\n" % res.getcode()); out.flush()
+while True:
+    chunk = res.read1(65536) if hasattr(res, "read1") else res.read(65536)
+    if not chunk:
+        break
+    out.write(chunk); out.flush()
+`;
+
+function connect(container) {
+  const request = (method, path, { body, params, headers, timeout = 30000 } = {}) => new Promise((resolve, reject) => {
+    const url = new URL(path, "http://127.0.0.1:8642");
     for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    const res = await fetch(url, {
-      method,
-      headers: { "X-LLM-Bawt-Key": key, "Content-Type": "application/json", ...headers },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: timeout ? AbortSignal.timeout(timeout) : undefined,
+    const child = spawn("docker", ["exec", "-i", container, "python", "-c", PROXY, method, url.href,
+      JSON.stringify({ "Content-Type": "application/json", ...headers })], { stdio: ["pipe", "pipe", "pipe"] });
+    const timer = timeout ? setTimeout(() => child.kill(), timeout) : null;
+    let stderr = "", head = Buffer.alloc(0), settled = false;
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", (err) => { if (!settled) { settled = true; reject(err); } });
+    child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        reject(new Error(`could not reach the API in the app container${code ? ` (exit ${code})` : ""}; is BawtHub running? Try bh status.${stderr.trim() ? ` ${stderr.trim().split("\n").pop()}` : ""}`));
+      }
     });
-    if (!res.ok) {
+    child.stdin.end(body === undefined ? "" : JSON.stringify(body));
+    const onHead = async (chunk) => {
+      head = Buffer.concat([head, chunk]);
+      const nl = head.indexOf(10);
+      if (nl < 0) return;
+      child.stdout.off("data", onHead);
+      child.stdout.pause();
+      settled = true;
+      const status = Number(head.subarray(0, nl).toString());
+      const rest = head.subarray(nl + 1);
+      async function* stream() {
+        if (rest.length) yield rest;
+        for await (const c of child.stdout) yield c;
+      }
+      const res = { status, ok: status >= 200 && status < 300, body: stream() };
+      res.text = async () => { let s = ""; for await (const c of res.body) s += c; return s; };
+      res.json = async () => JSON.parse(await res.text());
+      if (res.ok) return resolve(res);
       const text = (await res.text().catch(() => "")).slice(0, 400);
       let detail = text;
       try { detail = JSON.parse(text).detail ?? text; } catch {}
-      throw new Error(`${method} ${url.pathname}: HTTP ${res.status}${detail ? ` ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : ""}`);
-    }
-    return res;
-  };
+      reject(new Error(`${method} ${url.pathname}: HTTP ${status}${detail ? ` ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : ""}`));
+    };
+    child.stdout.on("data", onHead);
+  });
   const json = async (method, path, opts) => (await request(method, path, opts)).json();
   return { request, json };
 }
@@ -94,7 +130,7 @@ const CHAT_USAGE = [
 async function waitForReply(api, receipt, o) {
   const id = receipt.delivery_id;
   if (!id || !receipt.user_message_id) throw new Error("the queued receipt has no delivery id");
-  const deadline = Date.now() + o.timeout * 1000;
+  const deadline = o.deadline;
   for (;;) {
     const reply = await api.json("GET", `/v1/inter-bot-deliveries/${encodeURIComponent(id)}/reply`, {
       params: { bot_id: receipt.bot_id || o.bot, user_id: receipt.user_id || o.user, user_message_id: receipt.user_message_id },
@@ -137,7 +173,9 @@ async function resolveQueued(api, receipt, o) {
   return true;
 }
 
-async function ask(api, message, o) {
+async function ask(api, message, opts) {
+  // One deadline covers the request and any wait for a queued reply.
+  const o = { ...opts, deadline: Date.now() + opts.timeout * 1000 };
   const body = { messages: [{ role: "user", content: message }], stream: o.stream };
   if (o.bot) body.bot_id = o.bot;
   if (o.model) body.model = o.model;
@@ -156,7 +194,7 @@ async function ask(api, message, o) {
     headers: { "X-LLM-Bawt-Extension-Events": "comment", "X-LLM-Bawt-Admission-Events": "comment" },
   });
   const decoder = new TextDecoder();
-  let buffer = "", wrote = false, admitted = null, endsWithNewline = true, done = false;
+  let buffer = "", wrote = false, answered = false, admitted = null, endsWithNewline = true, done = false, failure = null;
   const out = (text) => { process.stdout.write(text); wrote = true; endsWithNewline = text.endsWith("\n"); };
   const handle = async (line) => {
     if (line.startsWith(ADMISSION.trim())) {
@@ -174,13 +212,13 @@ async function ask(api, message, o) {
     try { chunk = JSON.parse(data); } catch { return; }
     if (!chunk || typeof chunk !== "object") return;
     if (QUEUED.has(chunk.object)) { admitted = chunk; return; }
-    if (chunk.error && typeof chunk.error === "object") throw new Error(chunk.error.message || "the reply stream failed");
+    if (chunk.error && typeof chunk.error === "object") { failure = chunk.error.message || "the reply stream failed"; done = true; return; }
     if (chunk.object === "service.warning") { for (const w of chunk.warnings || []) warn(String(w)); return; }
     const delta = chunk.choices?.[0]?.delta || {};
     for (const call of delta.tool_calls || []) {
       if (!o.plain) { if (!endsWithNewline) out("\n"); out(dim(`⚙ ${call.function?.name || "tool"}`) + "\n"); }
     }
-    if (delta.content) out(delta.content);
+    if (delta.content) { out(delta.content); answered = true; }
   };
   for await (const part of res.body) {
     buffer += decoder.decode(part, { stream: true });
@@ -194,11 +232,18 @@ async function ask(api, message, o) {
     if (done) break;
   }
   if (wrote && !endsWithNewline) process.stdout.write("\n");
-  if (wrote) return true;
-  // An admitted turn that streamed nothing: wait for its recorded reply
-  // instead of resubmitting the message.
-  if (admitted) return resolveQueued(api, admitted, o);
-  warn("The service returned an empty reply; check bh logs app.");
+  const complete = done && !failure;
+  if (complete && answered) return true;
+  // An admitted turn whose stream ended without a full answer (still
+  // pending, an error frame, or a dropped connection): wait for that exact
+  // delivery's recorded reply instead of resubmitting the message.
+  if (admitted && !answered) {
+    if (failure) warn(failure);
+    return resolveQueued(api, admitted, o);
+  }
+  if (failure) warn(`bh: ${failure}`);
+  else if (!done) warn(answered ? "The reply ended early; the full answer will be in the web app." : "The connection ended before a reply.");
+  else warn("The service returned no reply text; check bh logs app.");
   return false;
 }
 
@@ -300,7 +345,8 @@ async function serviceStatus(api) {
 
 async function main() {
   const [command, container, ...argv] = process.argv.slice(2);
-  if (command === "chat" && (argv.includes("-h") || argv.includes("--help"))) { console.log(CHAT_USAGE); return 0; }
+  const options = argv.indexOf("--") < 0 ? argv : argv.slice(0, argv.indexOf("--"));
+  if (command === "chat" && (options.includes("-h") || options.includes("--help"))) { console.log(CHAT_USAGE); return 0; }
   if (!container) throw new Error("BawtHub's app service is not running; start it with bh start.");
   const api = await connect(container);
   if (command === "chat") return chat(api, argv);
