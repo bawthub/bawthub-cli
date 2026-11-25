@@ -11,7 +11,9 @@ usage() {
     '       bh [--dir DIR] [--manifest FILE] [--context NAME] [--installer FILE] ACTION [OPTIONS]' \
     '' \
     '  start | stop | restart           Use existing containers; keep all data' \
-    '  status                          Show service and endpoint health' \
+    '  status [--service]              Show service and endpoint health (--service: API status)' \
+    '  chat [OPTIONS] [MESSAGE...]     Chat with a bot from the terminal (bh chat --help)' \
+    '  jobs [runs [N] | run TYPE]      Show scheduled jobs and runs, or run one now' \
     '  version [--offline]             Compare installed versions with the latest release' \
     '  logs [-f] [--tail N] [SERVICE...]  Show logs (including stopped services)' \
     '  setup | install | configure | update | uninstall   Run the existing installer' \
@@ -49,7 +51,9 @@ done
 if (( $# == 0 )); then usage; exit 0; fi
 cmd="$1"; shift
 case "$cmd" in
-  start|stop|restart|status|setup|_version-inventory) (( $# == 0 )) || die "$cmd takes no arguments" ;;
+  start|stop|restart|setup|_version-inventory) (( $# == 0 )) || die "$cmd takes no arguments" ;;
+  status) [[ $# == 0 || ( $# == 1 && "$1" == --service ) ]] || die 'usage: bh status [--service]' ;;
+  chat|jobs) ;;
   version) [[ $# == 0 || ( $# == 1 && "$1" == --offline ) ]] || die 'usage: bh version [--offline]' ;;
   logs)
     for (( i=1; i<=$#; i++ )); do
@@ -85,13 +89,17 @@ done
 # Persist names in the manifests of non-default tenants, as the installer does.
 unset TENANT_NAME COMPOSE_PROJECT_NAME BAWTHUB_CLI_INITIAL_PROJECT BAWTHUB_CLI_INITIAL_PORT
 case "$cmd" in
-  start|stop|restart|status|logs|version|_version-inventory)
+  start|stop|restart|status|logs|version|_version-inventory|chat|jobs)
     unset COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_PROFILES
     export COMPOSE_DISABLE_ENV_FILE=1 ;;
 esac
 if [[ "$cmd" == version ]]; then
   command -v node >/dev/null || die 'Node.js 20 or later is required for bh version.'
   exec node "$(dirname "${BASH_SOURCE[0]}")/bh-version.cjs" "${BASH_SOURCE[0]}" "$root" "$manifest" "$context" "$@"
+fi
+if [[ "$cmd" == chat ]] && [[ " $* " == *" -h "* || " $* " == *" --help "* ]]; then
+  command -v node >/dev/null || die 'Node.js 20 or later is required for bh chat.'
+  exec node "$(dirname "${BASH_SOURCE[0]}")/bh-chat.cjs" chat "" --help
 fi
 [[ "$cmd" != status || -f "$manifest" ]] || { printf 'No BawtHub install at %s. Run bh install.\n' "$root"; exit 0; }
 command -v docker >/dev/null || die 'Install Docker Desktop on macOS or Docker Engine with Compose v2 on Linux.'
@@ -139,6 +147,16 @@ inspect_project() {
 }
 
 compose_project() { docker compose --project-name "$project" "$@"; }
+# chat, jobs and status --service call the running app's loopback API. The
+# project's containers were already checked to belong to this installation.
+api_client() {
+  local app
+  command -v node >/dev/null || die "Node.js 20 or later is required for bh $cmd."
+  app="$(docker ps --no-trunc --quiet --filter "label=com.docker.compose.project=$project" \
+    --filter label=com.docker.compose.service=app --filter label=com.docker.compose.oneoff=False --filter status=running | head -n 1)" \
+    || die 'could not inspect the app service'
+  exec node "$(dirname "${BASH_SOURCE[0]}")/bh-chat.cjs" "$@" "$app" "${api_args[@]+"${api_args[@]}"}"
+}
 stop_project() {
   if (( services )); then compose_project stop; fi
   inspect_project
@@ -201,6 +219,10 @@ case "$cmd" in
     if (( services )); then
       exec docker container inspect --format '[{{json (index .Config.Labels "com.docker.compose.service")}},{{json .Config.Image}},{{json .Image}}]' "${status_ids[@]}"
     fi ;;
+  chat|jobs)
+    [[ -n "$project" ]] || die "manifest not found: $manifest (select the installation with --dir or --manifest)"
+    api_args=("$@")
+    api_client "$cmd" ;;
   start|stop|restart|status|logs)
     [[ -n "$project" ]] || die "manifest not found: $manifest (select the installation with --dir or --manifest)"
     if [[ "$cmd" != status ]]; then
@@ -211,6 +233,7 @@ case "$cmd" in
       stop) stop_project ;;
       restart) stop_project; start_project ;;
       status)
+        if [[ "${1:-}" == --service ]]; then api_client service-status; fi
         status_renderer="$(dirname "${BASH_SOURCE[0]}")/bh-status.cjs"
         command -v node >/dev/null || die 'Node.js 20 or later is required for bh status.'
         if (( services )); then

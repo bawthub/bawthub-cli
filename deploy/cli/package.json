@@ -5,7 +5,7 @@
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "bin": { "bh": "bh.cjs" },
-  "files": ["bh.cjs", "bh.sh", "bh-status.cjs", "bh-version.cjs", "release"],
+  "files": ["bh.cjs", "bh.sh", "bh-status.cjs", "bh-version.cjs", "bh-chat.cjs", "release"],
   "os": ["darwin", "linux"],
   "engines": { "node": ">=20" }
 }
