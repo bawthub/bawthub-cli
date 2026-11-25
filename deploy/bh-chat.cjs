@@ -130,15 +130,24 @@ const CHAT_USAGE = [
 async function waitForReply(api, receipt, o) {
   const id = receipt.delivery_id;
   if (!id || !receipt.user_message_id) throw new Error("the queued receipt has no delivery id");
-  const deadline = o.deadline;
+  const remaining = () => o.deadline - Date.now();
   for (;;) {
-    const reply = await api.json("GET", `/v1/inter-bot-deliveries/${encodeURIComponent(id)}/reply`, {
-      params: { bot_id: receipt.bot_id || o.bot, user_id: receipt.user_id || o.user, user_message_id: receipt.user_message_id },
-    });
+    if (remaining() <= 0) return null;
+    let reply;
+    try {
+      reply = await api.json("GET", `/v1/inter-bot-deliveries/${encodeURIComponent(id)}/reply`, {
+        params: { bot_id: receipt.bot_id || o.bot, user_id: receipt.user_id || o.user, user_message_id: receipt.user_message_id },
+        timeout: Math.max(1, remaining()),
+      });
+    } catch (err) {
+      if (remaining() <= 0) return null;
+      throw err;
+    }
+    // A lookup that finished after the deadline is not accepted.
+    if (remaining() <= 0) return null;
     if (reply.delivery_id !== id) throw new Error("the reply changed delivery identity");
     if (TERMINAL.has(reply.status)) return reply;
-    if (Date.now() >= deadline) return null;
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, Math.min(1000, Math.max(0, remaining()))));
   }
 }
 
@@ -163,7 +172,7 @@ async function resolveQueued(api, receipt, o) {
   }
   if (!o.plain) console.error(dim("Queued; waiting for the reply…"));
   const reply = await waitForReply(api, receipt, o);
-  if (!reply) { warn(`Request ${ref} was accepted; its reply is still pending. It will appear in the web app.`); return false; }
+  if (!reply) { warn(`Timed out. Request ${ref} was accepted and may still finish; its reply will appear in the web app. It was not resent.`); return false; }
   if (reply.status !== "DELIVERED" || typeof reply.response_text !== "string") {
     warn(`Request ${ref} ended with status ${reply.status}.`);
     return false;
@@ -190,7 +199,7 @@ async function ask(api, message, opts) {
   }
   const res = await api.request("POST", "/v1/chat/completions", {
     body,
-    timeout: 0,
+    timeout: Math.max(1, o.deadline - Date.now()),
     headers: { "X-LLM-Bawt-Extension-Events": "comment", "X-LLM-Bawt-Admission-Events": "comment" },
   });
   const decoder = new TextDecoder();
@@ -232,6 +241,12 @@ async function ask(api, message, opts) {
     if (done) break;
   }
   if (wrote && !endsWithNewline) process.stdout.write("\n");
+  if (!done && Date.now() >= o.deadline) {
+    warn(admitted
+      ? `Timed out. Request ${admitted.delivery_id || admitted.turn_id || "unknown"} was accepted and may still finish; its reply will appear in the web app. It was not resent.`
+      : "Timed out waiting for the reply; the turn may still finish and appear in the web app.");
+    return false;
+  }
   const complete = done && !failure;
   if (complete && answered) return true;
   // An admitted turn whose stream ended without a full answer (still
